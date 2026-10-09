@@ -2,12 +2,9 @@ name: qwen3-asr
 
 services:
   asr:
-    build:
-      context: .
-      args:
-        BUNDLE_FLASH_ATTENTION: ${BUNDLE_FLASH_ATTENTION:-true}
-        MAX_JOBS: ${MAX_JOBS:-8}
-    image: ${IMAGE:-qwen3-asr-server:local}
+    # Prebuilt image published by .github/workflows/docker-publish.yml on v*.*.* tags.
+    # To build locally instead, add compose.local.yaml (see README).
+    image: ${IMAGE:-ghcr.io/dreamyfishmt/fast-qwen-asr-inference-vllm}:${IMAGE_TAG:-latest}
     container_name: ${CONTAINER:-qwen3-asr}
     ipc: host
     ports:
@@ -19,7 +16,9 @@ services:
       TRANSFORMERS_OFFLINE: "1"
       VLLM_CACHE_ROOT: /cache/vllm
       ENABLE_ASR_MODEL: "true"
-      ASR_MODEL_NAME: /models/${ASR_MODEL_DIR:-Qwen3-ASR-1.7B}
+      ASR_MODEL_NAME: /models/${ASR_MODEL_DIR:-Qwen3-ASR-1.7B-fp8}
+      # "modelopt" for the default FP8 checkpoint; set VLLM_QUANTIZATION= (empty) for the BF16 model
+      VLLM_QUANTIZATION: ${VLLM_QUANTIZATION-modelopt}
       ENABLE_ALIGNER_MODEL: ${ENABLE_ALIGNER_MODEL:-false}
       ALIGNER_MODEL_NAME: /models/${ALIGNER_MODEL_DIR:-Qwen3-ForcedAligner-0.6B}
       GPU_MEMORY_UTILIZATION: ${GPU_MEMORY_UTILIZATION:-0.15}

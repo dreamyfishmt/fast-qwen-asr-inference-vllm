@@ -1,0 +1,11 @@
+# Local build overlay: build the image from this checkout instead of pulling it from GHCR.
+#   docker compose -f compose.yaml -f compose.local.yaml up -d --build
+services:
+  asr:
+    build:
+      context: .
+      args:
+        BUNDLE_FLASH_ATTENTION: ${BUNDLE_FLASH_ATTENTION:-true}
+        MAX_JOBS: ${MAX_JOBS:-8}
+    image: qwen3-asr-server:local
+    pull_policy: build
