@@ -1,0 +1,52 @@
+name: qwen3-asr
+
+services:
+  asr:
+    build:
+      context: .
+      args:
+        BUNDLE_FLASH_ATTENTION: ${BUNDLE_FLASH_ATTENTION:-true}
+        MAX_JOBS: ${MAX_JOBS:-8}
+    image: ${IMAGE:-qwen3-asr-server:local}
+    container_name: ${CONTAINER:-qwen3-asr}
+    ipc: host
+    ports:
+      # Bound to localhost only: the server has no authentication.
+      - "${BIND_ADDR:-127.0.0.1}:${PORT:-8907}:8000"
+    environment:
+      # Models are read from the mounted directory; never contact the HF Hub.
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      VLLM_CACHE_ROOT: /cache/vllm
+      ENABLE_ASR_MODEL: "true"
+      ASR_MODEL_NAME: /models/${ASR_MODEL_DIR:-Qwen3-ASR-1.7B}
+      ENABLE_ALIGNER_MODEL: ${ENABLE_ALIGNER_MODEL:-false}
+      ALIGNER_MODEL_NAME: /models/${ALIGNER_MODEL_DIR:-Qwen3-ForcedAligner-0.6B}
+      GPU_MEMORY_UTILIZATION: ${GPU_MEMORY_UTILIZATION:-0.15}
+      MAX_CONCURRENT_INFER: ${MAX_CONCURRENT_INFER:-1}
+      STREAM_CHUNK_SIZE_SEC: ${STREAM_CHUNK_SIZE_SEC:-1.0}
+      STREAM_UNFIXED_CHUNK_NUM: ${STREAM_UNFIXED_CHUNK_NUM:-2}
+      STREAM_UNFIXED_TOKEN_NUM: ${STREAM_UNFIXED_TOKEN_NUM:-5}
+      PARTIAL_INTERVAL_MS: ${PARTIAL_INTERVAL_MS:-120}
+    volumes:
+      - ${MODEL_DIR:?set MODEL_DIR in .env}:/models:ro
+      - vllm_cache:/cache/vllm
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=3).status == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      # Model load + CUDA graph capture + warmup can take several minutes on first start
+      start_period: 600s
+    restart: unless-stopped
+
+volumes:
+  # vLLM / torch.compile cache, kept across restarts to speed up startup
+  vllm_cache:

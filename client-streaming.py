@@ -6,6 +6,7 @@ import argparse
 import sys
 import websockets
 from datetime import datetime
+from urllib.parse import urlencode
 
 import os
 import time
@@ -62,9 +63,14 @@ async def main():
     parser = argparse.ArgumentParser(description="Qwen3-ASR Streaming Client")
     parser.add_argument("-e", "--endpoint", required=True, help="WebSocket Endpoint URL (e.g. ws://localhost:8907/transcribe-streaming)")
     parser.add_argument("-f", "--file", required=True, help="Path to raw PCM 16k 16-bit mono file (or WAV with correct format)")
+    parser.add_argument("-l", "--language", help="Language hint, e.g. de, en, zh-CN, zh-TW (sent as ?language=...)")
     args = parser.parse_args()
 
-    print(f"Connecting to {args.endpoint}...")
+    endpoint = args.endpoint
+    if args.language:
+        endpoint += ("&" if "?" in endpoint else "?") + urlencode({"language": args.language})
+
+    print(f"Connecting to {endpoint}...")
     
     file_size = os.path.getsize(args.file)
     duration = file_size / 32000.0 # 16000 * 2 bytes
@@ -72,7 +78,7 @@ async def main():
     
     start_time = time.time()
     try:
-        async with websockets.connect(args.endpoint, max_size=None) as ws:
+        async with websockets.connect(endpoint, max_size=None) as ws:
             await asyncio.gather(sender(ws, args.file), receiver(ws))
             
         end_time = time.time()
@@ -83,6 +89,7 @@ async def main():
         
     except Exception as e:
         print(f"Connection failed: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -1,4 +1,5 @@
-# Dockerfile of qwenllm/qwen3-asr:cu128
+# Qwen3-ASR (vLLM backend) FastAPI server.
+# Built and started via compose.yaml; see README.md.
 
 ARG CUDA_VERSION=12.8.0
 ARG from=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
@@ -8,12 +9,10 @@ ARG DEBIAN_FRONTEND=noninteractive
 RUN <<EOF
 apt update -y && apt upgrade -y && apt install -y --no-install-recommends  \
     git \
-    git-lfs \
     python3 \
     python3-pip \
     python3-dev \
     wget \
-    vim \
     libsndfile1 \
     ccache \
     software-properties-common \
@@ -32,11 +31,11 @@ RUN wget https://github.com/Kitware/CMake/releases/download/v3.26.1/cmake-3.26.1
 
 RUN ln -s /usr/bin/python3 /usr/bin/python
 
-RUN git lfs install
+WORKDIR /app
 
-WORKDIR /data/shared/Qwen3-ASR
-
-ENV MAX_JOBS=32
+# Parallelism for compiling flash-attn from source (only used when no prebuilt wheel matches)
+ARG MAX_JOBS=8
+ENV MAX_JOBS=${MAX_JOBS}
 ENV NVCC_THREADS=2
 ENV CCACHE_DIR=/root/.cache/ccache
 
@@ -47,19 +46,20 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 RUN apt remove python3-blinker -y
 
-
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip3 install -U "qwen-asr[vllm]" fastapi uvicorn python-multipart requests soundfile scipy websockets
+    pip3 install -U "qwen-asr[vllm]" fastapi uvicorn python-multipart requests soundfile scipy websockets psutil \
+        opencc-python-reimplemented
 
+# flash-attn's setup tries to download a prebuilt wheel matching torch/CUDA first,
+# and only falls back to a (slow) source build.
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
     if [ "$BUNDLE_FLASH_ATTENTION" = "true" ]; then \
-        pip3 install -U flash-attn --no-build-isolation git+https://github.com/Dao-AILab/flash-attention.git; \
+        pip3 install -U flash-attn --no-build-isolation; \
     fi
 
-RUN rm -rf /root/.cache/pip
+COPY server.py /app/server.py
 
-EXPOSE 80
+EXPOSE 8000
 
-# server.py will be mounted at runtime
-CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]

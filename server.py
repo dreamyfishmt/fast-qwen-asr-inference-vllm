@@ -16,14 +16,17 @@ import torch
 import psutil
 from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 # Import Qwen-ASR components
 try:
     from qwen_asr import Qwen3ASRModel, Qwen3ForcedAligner
+    from qwen_asr.inference.utils import SUPPORTED_LANGUAGES
 except ImportError:
     print("Warning: qwen_asr not found.")
     Qwen3ASRModel = None
     Qwen3ForcedAligner = None
+    SUPPORTED_LANGUAGES = None
 
 # Logging
 logging.basicConfig(level=logging.INFO)
@@ -44,6 +47,16 @@ STREAM_MIN_SAMPLES = int(os.getenv("STREAM_MIN_SAMPLES", "1600"))  # 100ms @ 16k
 PARTIAL_INTERVAL_MS = int(os.getenv("PARTIAL_INTERVAL_MS", "120"))  # throttle partials
 STREAM_EXPECT_SR = int(os.getenv("STREAM_EXPECT_SR", "16000"))
 
+# Streaming decoder params (qwen_asr init_streaming_state).
+# Smaller chunk size -> partial text updates more often, at the cost of more GPU calls.
+STREAM_CHUNK_SIZE_SEC = float(os.getenv("STREAM_CHUNK_SIZE_SEC", "2.0"))
+STREAM_UNFIXED_CHUNK_NUM = int(os.getenv("STREAM_UNFIXED_CHUNK_NUM", "2"))
+STREAM_UNFIXED_TOKEN_NUM = int(os.getenv("STREAM_UNFIXED_TOKEN_NUM", "5"))
+
+# OpenCC config used when a Traditional Chinese variant (zh-TW, zh-HK, zh-Hant) is requested.
+OPENCC_TW_CONFIG = os.getenv("OPENCC_TW_CONFIG", "s2twp")
+OPENCC_HK_CONFIG = os.getenv("OPENCC_HK_CONFIG", "s2hk")
+
 # -----------------------------
 # App state
 # -----------------------------
@@ -61,18 +74,56 @@ async def to_thread_limited(sem: asyncio.Semaphore, fn, *args, **kwargs):
     async with sem:
         return await asyncio.to_thread(fn, *args, **kwargs)
 
-def map_language(lang_code: Optional[str]) -> Optional[str]:
-    """Map ISO code to Qwen full name."""
-    if lang_code is None:
-        return None
-    mapping = {
-        "en": "English", "de": "German", "fr": "French", "es": "Spanish",
-        "it": "Italian", "ja": "Japanese", "ko": "Korean", "zh": "Chinese",
-        "ru": "Russian", "pt": "Portuguese", "nl": "Dutch", "tr": "Turkish",
-        "sv": "Swedish", "id": "Indonesian", "vi": "Vietnamese",
-        "hi": "Hindi", "ar": "Arabic",
-    }
-    return mapping.get(lang_code.lower(), lang_code)
+LANGUAGE_MAP = {
+    "en": "English", "de": "German", "fr": "French", "es": "Spanish",
+    "it": "Italian", "ja": "Japanese", "ko": "Korean", "zh": "Chinese",
+    "ru": "Russian", "pt": "Portuguese", "nl": "Dutch", "tr": "Turkish",
+    "sv": "Swedish", "id": "Indonesian", "vi": "Vietnamese",
+    "hi": "Hindi", "ar": "Arabic", "yue": "Cantonese", "th": "Thai",
+    "ms": "Malay", "da": "Danish", "fi": "Finnish", "pl": "Polish",
+    "cs": "Czech", "fil": "Filipino", "tl": "Filipino", "fa": "Persian",
+    "el": "Greek", "ro": "Romanian", "hu": "Hungarian", "mk": "Macedonian",
+}
+
+# Chinese script variants -> OpenCC config (None = keep the model's Simplified output)
+ZH_SCRIPT_MAP = {
+    "zh-cn": None, "zh-sg": None, "zh-hans": None,
+    "zh-tw": OPENCC_TW_CONFIG, "zh-hant": OPENCC_TW_CONFIG,
+    "zh-hk": OPENCC_HK_CONFIG, "zh-mo": OPENCC_HK_CONFIG,
+}
+
+def map_language(lang_code: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Map a language code (ISO 639-1 or BCP-47, e.g. "en", "zh-CN", "zh-TW")
+    to (Qwen full language name, OpenCC config or None).
+    Qwen3-ASR has a single "Chinese" language, so Traditional output is
+    produced by converting the Simplified transcript with OpenCC.
+    Full language names (e.g. "Chinese") are accepted as well.
+    Raises ValueError for languages the model does not support.
+    """
+    if not lang_code or not lang_code.strip():
+        return None, None
+    code = lang_code.strip().lower().replace("_", "-")
+    if code in ZH_SCRIPT_MAP:
+        return "Chinese", ZH_SCRIPT_MAP[code]
+    base = code.split("-", 1)[0]
+    if base in LANGUAGE_MAP:
+        return LANGUAGE_MAP[base], None
+    name = lang_code.strip().capitalize()
+    if SUPPORTED_LANGUAGES is None or name in SUPPORTED_LANGUAGES:
+        return name, None
+    raise ValueError(f"Unsupported language: {lang_code}")
+
+_opencc_converters = {}
+
+def get_converter(config: Optional[str]):
+    """Return a cached text converter for the OpenCC config (identity if None)."""
+    if config is None:
+        return lambda text: text
+    if config not in _opencc_converters:
+        import opencc
+        _opencc_converters[config] = opencc.OpenCC(config).convert
+    return _opencc_converters[config]
 
 def read_audio_file(file_bytes: bytes) -> Tuple[np.ndarray, int]:
     """
@@ -181,9 +232,9 @@ async def load_models_background():
             async with infer_sem:
                 state = await asyncio.to_thread(
                     models["asr"].init_streaming_state,
-                    unfixed_chunk_num=2,
-                    unfixed_token_num=5,
-                    chunk_size_sec=2.0,
+                    unfixed_chunk_num=STREAM_UNFIXED_CHUNK_NUM,
+                    unfixed_token_num=STREAM_UNFIXED_TOKEN_NUM,
+                    chunk_size_sec=STREAM_CHUNK_SIZE_SEC,
                 )
 
             warmup_chunks = [320, 640, 1024, 3200] + [3200] * 25
@@ -252,6 +303,12 @@ async def health():
             "max_concurrent_infer": MAX_CONCURRENT_INFER,
             "threadpool_workers": THREADPOOL_WORKERS,
         },
+        "streaming": {
+            "chunk_size_sec": STREAM_CHUNK_SIZE_SEC,
+            "unfixed_chunk_num": STREAM_UNFIXED_CHUNK_NUM,
+            "unfixed_token_num": STREAM_UNFIXED_TOKEN_NUM,
+            "partial_interval_ms": PARTIAL_INTERVAL_MS,
+        },
         "memory": {
             "ram_total_mb": mem.total // (1024 * 1024),
             "ram_available_mb": mem.available // (1024 * 1024),
@@ -263,10 +320,17 @@ async def health():
         info["memory"]["gpu_reserved_mb"] = torch.cuda.memory_reserved() // (1024 * 1024)
     return info
 
+@app.get("/ready")
+async def ready():
+    """200 once models are loaded and warmed up, 503 otherwise (for container healthchecks)."""
+    if model_status != "ready":
+        return JSONResponse(status_code=503, content={"status": model_status})
+    return {"status": model_status}
+
 @app.post("/transcribe")
 async def transcribe(
     files: List[UploadFile] = File(...),
-    language: Optional[str] = Query(None, description="Language code (e.g. en, de, fr). None for auto-detect."),
+    language: Optional[str] = Query(None, description="Language code (e.g. en, de, zh-CN, zh-TW). None for auto-detect."),
     forced_alignment: bool = Query(False, description="Enable forced alignment (timestamps)"),
 ):
     await model_ready_event.wait()
@@ -276,7 +340,11 @@ async def transcribe(
     if "asr" not in models:
         raise HTTPException(status_code=503, detail="ASR model is not enabled or failed to load.")
 
-    full_lang = map_language(language)
+    try:
+        full_lang, opencc_config = map_language(language)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    convert = get_converter(opencc_config)
 
     async def decode_one(f: UploadFile):
         content = await f.read()
@@ -304,7 +372,7 @@ async def transcribe(
             if "aligner" not in models:
                 raise HTTPException(status_code=503, detail="Aligner model is not enabled or failed to load.")
 
-            texts = [r.text for r in results]
+            texts = [r.text for r in results]  # align against the model's original script
 
             async with infer_sem:
                 alignment_results = await asyncio.to_thread(
@@ -316,11 +384,11 @@ async def transcribe(
 
             for i, res in enumerate(results):
                 response_list.append(
-                    {"text": res.text, "language": res.language, "timestamps": alignment_results[i]}
+                    {"text": convert(res.text), "language": res.language, "timestamps": alignment_results[i]}
                 )
         else:
             for res in results:
-                response_list.append({"text": res.text, "language": res.language})
+                response_list.append({"text": convert(res.text), "language": res.language})
 
         return response_list
 
@@ -345,7 +413,13 @@ async def websocket_endpoint(
         await ws.close(code=1011, reason=f"Server not ready: {model_status}")
         return
 
-    full_lang = map_language(language)
+    try:
+        full_lang, opencc_config = map_language(language)
+    except ValueError as e:
+        await ws.send_json({"type": "error", "message": str(e)})
+        await ws.close(code=1003)
+        return
+    convert = get_converter(opencc_config)
     client_sr = None
     started = False
 
@@ -354,9 +428,10 @@ async def websocket_endpoint(
         async with infer_sem:
             state = await asyncio.to_thread(
                 models["asr"].init_streaming_state,
-                unfixed_chunk_num=2,
-                unfixed_token_num=5,
-                chunk_size_sec=2.0,
+                language=full_lang,
+                unfixed_chunk_num=STREAM_UNFIXED_CHUNK_NUM,
+                unfixed_token_num=STREAM_UNFIXED_TOKEN_NUM,
+                chunk_size_sec=STREAM_CHUNK_SIZE_SEC,
             )
     except Exception as e:
         logger.exception(f"Failed to init streaming state: {e}")
@@ -378,6 +453,9 @@ async def websocket_endpoint(
         if buf_n <= 0:
             return
         chunk = np.concatenate(buf_parts, axis=0) if len(buf_parts) > 1 else buf_parts[0]
+        # streaming_transcribe() buffers/accumulates internally: feed only new samples
+        buf_parts = []
+        buf_n = 0
 
         async with infer_sem:
             await asyncio.to_thread(models["asr"].streaming_transcribe, chunk, state)
@@ -385,7 +463,8 @@ async def websocket_endpoint(
         if send_partial:
             now = time.monotonic()
             if (now - last_partial_ts) * 1000.0 >= PARTIAL_INTERVAL_MS:
-                await ws.send_json({"type": "partial", "text": state.text, "language": state.language})
+                last_partial_ts = now
+                await ws.send_json({"type": "partial", "text": convert(state.text), "language": state.language})
 
     try:
         while True:
@@ -430,7 +509,7 @@ async def websocket_endpoint(
                         async with infer_sem:
                             await asyncio.to_thread(models["asr"].finish_streaming_transcribe, state)
 
-                        await ws.send_json({"type": "final", "text": state.text, "language": state.language})
+                        await ws.send_json({"type": "final", "text": convert(state.text), "language": state.language})
                         await ws.close(code=1000)
                         return
 
