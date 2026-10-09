@@ -35,7 +35,7 @@ class VllmStream(Stream):
     def language(self) -> str:
         return self._state.language
 
-    def feed(self, pcm: np.ndarray) -> bool:
+    def feed(self, pcm: np.ndarray, partial: bool = True) -> bool:
         # streaming_transcribe() buffers internally and decodes once per full chunk
         self._model.streaming_transcribe(pcm, self._state)
         return True

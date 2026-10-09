@@ -8,7 +8,7 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 RUN pip install \
-        "onnxruntime>=1.20" "tokenizers>=0.20" numpy scipy \
+        "onnxruntime>=1.20" onnx "tokenizers>=0.20" numpy scipy \
         fastapi "uvicorn>=0.30" websockets python-multipart soundfile psutil \
         opencc-python-reimplemented
 
@@ -18,7 +18,9 @@ COPY server.py /app/server.py
 COPY engines /app/engines
 
 USER app
-ENV ASR_BACKEND=onnx
+ENV ASR_BACKEND=onnx \
+    # fewer glibc malloc arenas: keeps RSS from creeping up across requests
+    MALLOC_ARENA_MAX=2
 EXPOSE 8000
 
 CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]

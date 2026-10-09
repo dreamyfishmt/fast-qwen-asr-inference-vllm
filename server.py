@@ -362,7 +362,7 @@ async def websocket_endpoint(
         buf_n = 0
 
         async with infer_sem:
-            updated = await asyncio.to_thread(stream.feed, chunk)
+            updated = await asyncio.to_thread(stream.feed, chunk, send_partial)
 
         if send_partial and updated:
             now = asyncio.get_running_loop().time()

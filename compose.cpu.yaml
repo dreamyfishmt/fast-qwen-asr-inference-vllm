@@ -12,14 +12,15 @@ services:
       - "${BIND_ADDR:-0.0.0.0}:${PORT:-8907}:8000"
     environment:
       ASR_BACKEND: onnx
-      ASR_MODEL_NAME: /models/${ASR_MODEL_DIR:-qwen3-asr-0.6b-onnx-int4-merged}
+      ASR_MODEL_NAME: /models/${ASR_MODEL_DIR:-qwen3-asr-0.6b-onnx}
       # Required: clients send "Authorization: Bearer <API_TOKEN>"
       API_TOKEN: ${API_TOKEN:?set API_TOKEN in .env}
       ONNX_THREADS: ${ONNX_THREADS:-0}
       MAX_CONCURRENT_INFER: "1"
       STREAM_PARTIALS: ${STREAM_PARTIALS:-true}
       STREAM_PARTIAL_INTERVAL_SEC: ${STREAM_PARTIAL_INTERVAL_SEC:-2.0}
-      STREAM_PARTIAL_MAX_SEC: ${STREAM_PARTIAL_MAX_SEC:-10}
+      STREAM_PARTIAL_MAX_SEC: ${STREAM_PARTIAL_MAX_SEC:-20}
+      STREAM_REUSE_PARTIAL: ${STREAM_REUSE_PARTIAL:-true}
       STREAM_MAX_SEC: ${STREAM_MAX_SEC:-60}
       THREADPOOL_WORKERS: "8"
     volumes:

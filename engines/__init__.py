@@ -22,8 +22,9 @@ class Stream:
     text: str = ""
     language: str = ""
 
-    def feed(self, pcm: np.ndarray) -> bool:
-        """Add 16 kHz float32 samples. Returns True if `text` may have changed."""
+    def feed(self, pcm: np.ndarray, partial: bool = True) -> bool:
+        """Add 16 kHz float32 samples. Returns True if `text` may have changed.
+        partial=False: more audio is not expected (stop), don't start partial work."""
         raise NotImplementedError
 
     def finish(self) -> None:

@@ -8,7 +8,7 @@ Two images, same API:
 | Image | Backend | Model | Hardware |
 |---|---|---|---|
 | `…:latest` | vLLM + `qwen-asr` | Qwen3-ASR-1.7B (FP8) | NVIDIA GPU (RTX 30 series or newer) |
-| `…:latest-cpu` | ONNX Runtime | Qwen3-ASR-0.6B (int4) | Any x86-64 / ARM64 CPU, ~2 GB RAM. See [CPU deployment](#cpu-deployment) |
+| `…:latest-cpu` | ONNX Runtime | Qwen3-ASR-0.6B (int4) | Any x86-64 / ARM64 CPU, 2+ GB RAM. See [CPU deployment](#cpu-deployment) |
 
 The server runs with Docker Compose and loads the models from a **local model directory**
 mounted into the container (read-only, offline — the HuggingFace Hub is never contacted).
@@ -123,15 +123,25 @@ docker compose -f compose.yaml -f compose.dev.yaml up
 ## CPU deployment
 
 For servers without a GPU, e.g. a small VPS that clients reach over the internet. Uses ONNX Runtime with
-[`rhasspy/qwen3-asr-0.6b-onnx-int4-merged`](https://huggingface.co/rhasspy/qwen3-asr-0.6b-onnx-int4-merged)
-(Qwen3-ASR-0.6B, int4, ~785 MB). The image has no PyTorch or CUDA.
+Qwen3-ASR-0.6B quantized to int4 (~840 MB of model files); the image has no PyTorch or CUDA.
+
+The model folder combines two Hugging Face repos: the audio encoder, embeddings and tokenizer from
+[`rhasspy/qwen3-asr-0.6b-onnx-int4-merged`](https://huggingface.co/rhasspy/qwen3-asr-0.6b-onnx-int4-merged), and the
+text decoder from [`sorryhyun/qwen3-asr-onnx-gqa`](https://huggingface.co/sorryhyun/qwen3-asr-onnx-gqa)
+(built with GroupQueryAttention, so the cost per generated token stays almost flat as the utterance grows).
 
 1. Download the model:
 
    ```bash
+   D=/srv/models/qwen3-asr-0.6b-onnx
    uvx --from huggingface_hub hf download rhasspy/qwen3-asr-0.6b-onnx-int4-merged \
-     --local-dir /srv/models/qwen3-asr-0.6b-onnx-int4-merged
+     config.json tokenizer.json embed_tokens.bin encoder.int4.onnx encoder.int4.onnx.data --local-dir $D
+   uvx --from huggingface_hub hf download sorryhyun/qwen3-asr-onnx-gqa \
+     decoder-0.6b-fp32.onnx decoder-0.6b-fp32.onnx.data --local-dir $D
    ```
+
+   (The rhasspy repo's own `decoder_merged.int4.onnx` also works if present and no `decoder-*.onnx` is, but it is
+   ~2× slower and more prone to repetition loops; `ONNX_DECODER` picks a decoder file explicitly.)
 
 2. Get `compose.cpu.yaml`, `Caddyfile` and `.env.cpu.example` from this repo, then:
 
@@ -151,19 +161,42 @@ For servers without a GPU, e.g. a small VPS that clients reach over the internet
 
 4. Check: `curl -H "Authorization: Bearer $API_TOKEN" https://DOMAIN/health`
 
-**Behaviour on CPU.** This export has no incremental decoder, so a live `partial` means re-transcribing the
-whole utterance so far. Partials are therefore sent every `STREAM_PARTIAL_INTERVAL_SEC` (2 s) only while the
-utterance is shorter than `STREAM_PARTIAL_MAX_SEC` (10 s); the `final` result is always a full transcription
-after `stop`. Utterances are capped at `STREAM_MAX_SEC` (60 s). Requests are processed one at a time.
+### How streaming works on CPU
+
+This export has no incremental decoder, so a `partial` result re-transcribes the utterance so far. To keep that
+affordable:
+
+- Partials run in the background every `STREAM_PARTIAL_INTERVAL_SEC` (2 s) for the first `STREAM_PARTIAL_MAX_SEC`
+  (20 s) of an utterance. Each one continues from the previous partial minus its last `STREAM_UNFIXED_TOKEN_NUM`
+  tokens (the rollback strategy of qwen-asr's own streaming), so it only generates the new part.
+- On `stop`, a partial still running is aborted and the final result is computed right away, again continuing
+  from the last partial.
+- Requests are transcribed one at a time; a partial is skipped when another request is being transcribed.
+
+Measured with 2 cores of an Intel Xeon (2.1 GHz, AVX-512) and audio sent at real-time speed; expect slower
+results on CPUs without AVX-512 / AMX:
+
+| Utterance | Delay from `stop` to `final` |
+|---|---|
+| 4 s | 1.4 s |
+| 6 s, fast speech (~60 characters) | 2.3–2.5 s |
+| 11 s | 2.9 s |
+| 23 s | 3.9 s |
+
+Memory: ~0.9 GB resident after loading, ~1.1 GB while serving short utterances, ~1.45 GB peak for a 51 s
+utterance. 2 GB of RAM works for dictation-length audio; 4 GB leaves headroom for `STREAM_MAX_SEC=60`.
 
 | Variable | Default | Description |
 |---|---|---|
 | `API_TOKEN` | — (required) | Shared secret; clients send `Authorization: Bearer <token>` |
-| `ASR_MODEL_DIR` | `qwen3-asr-0.6b-onnx-int4-merged` | Model folder inside `MODEL_DIR` (merged or split int4 layout) |
+| `ASR_MODEL_DIR` | `qwen3-asr-0.6b-onnx` | Model folder inside `MODEL_DIR` |
+| `ONNX_DECODER` | auto | Decoder file in the model folder (`decoder-*.onnx`, then `decoder_merged.int4.onnx`, then split) |
 | `ONNX_THREADS` | `0` (all cores) | ONNX Runtime threads |
 | `STREAM_PARTIALS` | `true` | Send live partial results |
 | `STREAM_PARTIAL_INTERVAL_SEC` | `2.0` | Seconds of new audio between partials |
-| `STREAM_PARTIAL_MAX_SEC` | `10` | No partials once the utterance is longer than this |
+| `STREAM_PARTIAL_MAX_SEC` | `20` | No partials once the utterance is longer than this |
+| `STREAM_REUSE_PARTIAL` | `true` | Continue from the previous partial instead of decoding from scratch |
+| `STREAM_UNFIXED_CHUNK_NUM` / `STREAM_UNFIXED_TOKEN_NUM` | `2` / `5` | First N partials start from scratch; last K tokens are re-decoded |
 | `STREAM_MAX_SEC` | `60` | Audio beyond this per utterance is dropped (an `info` message is sent) |
 | `DOMAIN` | — | Domain for the `tls` profile (Caddy, automatic HTTPS) |
 
