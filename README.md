@@ -38,26 +38,25 @@ Qwen3-ASR-1.7B (int4) on an NVIDIA GPU with ONNX Runtime's CUDA execution provid
   - Windows: Docker Desktop with the WSL 2 backend (GPU support is built in)
 - [uv](https://docs.astral.sh/uv/) or the `hf` CLI, to download the model
 
-1. Download the model (~2.7 GB): encoder, embeddings and tokenizer of
-   [`andrewleech/qwen3-asr-1.7b-onnx`](https://huggingface.co/andrewleech/qwen3-asr-1.7b-onnx), and the int4
-   GroupQueryAttention decoder with fp16 I/O from [`sorryhyun/qwen3-asr-onnx-gqa`](https://huggingface.co/sorryhyun/qwen3-asr-onnx-gqa),
-   pinned to the tested revisions:
+1. Download the model (~2.7 GB) from [`dreamyfishmt/qwen3-asr-1.7b-onnx`](https://huggingface.co/dreamyfishmt/qwen3-asr-1.7b-onnx),
+   pinned to the tested revision:
 
    ```bash
-   scripts/download-models.sh 1.7b /srv/models   # -> /srv/models/qwen3-asr-1.7b-onnx
+   hf download dreamyfishmt/qwen3-asr-1.7b-onnx --revision f4a19c9705b87ea06685b1ffddd95772ffbde1b0 \
+     --local-dir /srv/models/qwen3-asr-1.7b-onnx
+   # or: scripts/download-models.sh 1.7b /srv/models   # -> /srv/models/qwen3-asr-1.7b-onnx
    ```
 
-   On Windows without bash, run the equivalent commands (PowerShell; `uvx` from [uv](https://docs.astral.sh/uv/)):
+   On Windows (PowerShell; `uvx` from [uv](https://docs.astral.sh/uv/)):
 
    ```powershell
-   $D = "D:/models/qwen3-asr-1.7b-onnx"
-   uvx --from huggingface_hub hf download andrewleech/qwen3-asr-1.7b-onnx `
-     config.json tokenizer.json embed_tokens.bin encoder.onnx `
-     --revision df916193ac67e59347769891a21e10d81d12acdd --local-dir $D
-   uvx --from huggingface_hub hf download sorryhyun/qwen3-asr-onnx-gqa `
-     decoder-1.7b-fp16.onnx decoder-1.7b-fp16.onnx.data `
-     --revision 075249f70b56cdded1cf4b189cbdde0fb77aeec1 --local-dir $D
+   uvx --from huggingface_hub hf download dreamyfishmt/qwen3-asr-1.7b-onnx --revision f4a19c9705b87ea06685b1ffddd95772ffbde1b0 --local-dir D:/models/qwen3-asr-1.7b-onnx
    ```
+
+   The repo repackages, unmodified, the encoder, embeddings and tokenizer of
+   [`andrewleech/qwen3-asr-1.7b-onnx`](https://huggingface.co/andrewleech/qwen3-asr-1.7b-onnx) and the int4
+   GroupQueryAttention decoder with fp16 I/O from [`sorryhyun/qwen3-asr-onnx-gqa`](https://huggingface.co/sorryhyun/qwen3-asr-onnx-gqa);
+   see its [model card](https://huggingface.co/dreamyfishmt/qwen3-asr-1.7b-onnx) for the exact source revisions.
 
    The 0.6B model folder from [CPU deployment](#cpu-deployment) works on the GPU too (set `ASR_MODEL_DIR`).
 
