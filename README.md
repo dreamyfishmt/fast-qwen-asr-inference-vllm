@@ -108,8 +108,9 @@ docker compose -f compose.yaml -f compose.local.yaml up -d --build
 docker compose -f compose.yaml -f compose.local.yaml build --no-cache   # full rebuild
 ```
 
-Building compiles/installs flash-attn and takes a while; `BUNDLE_FLASH_ATTENTION` and `MAX_JOBS` in `.env`
-control it.
+flash-attn is not installed by default (vLLM has its own attention kernels; flash-attn only speeds up the forced
+aligner). Set `BUNDLE_FLASH_ATTENTION=true` to include it; this may compile it from source, which takes a long time
+and a lot of RAM (`MAX_JOBS` limits the parallel jobs). Both are read from `.env`.
 
 ### Development mode
 
@@ -254,7 +255,7 @@ Set in `.env` (see `.env.example`):
 | `STREAM_UNFIXED_CHUNK_NUM` | `2` | First N chunks are decoded without a text prefix |
 | `STREAM_UNFIXED_TOKEN_NUM` | `5` | Trailing tokens rolled back (re-decodable) on each step |
 | `PARTIAL_INTERVAL_MS` | `120` | Minimum interval between `partial` messages |
-| `BUNDLE_FLASH_ATTENTION` | `true` | Local build only: install flash-attn |
+| `BUNDLE_FLASH_ATTENTION` | `false` | Local build only: install flash-attn (speeds up the forced aligner) |
 | `MAX_JOBS` | `8` | Local build only: parallel jobs if flash-attn has to be compiled from source |
 
 Further server settings (`MAX_CONCURRENT_INFER`, `MAX_CONCURRENT_DECODE`, `THREADPOOL_WORKERS`,

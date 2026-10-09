@@ -5,7 +5,7 @@ services:
     build:
       context: .
       args:
-        BUNDLE_FLASH_ATTENTION: ${BUNDLE_FLASH_ATTENTION:-true}
+        BUNDLE_FLASH_ATTENTION: ${BUNDLE_FLASH_ATTENTION:-false}
         MAX_JOBS: ${MAX_JOBS:-8}
     image: qwen3-asr-server:local
     pull_policy: build

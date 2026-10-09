@@ -39,7 +39,9 @@ ENV MAX_JOBS=${MAX_JOBS}
 ENV NVCC_THREADS=2
 ENV CCACHE_DIR=/root/.cache/ccache
 
-ARG BUNDLE_FLASH_ATTENTION=true
+# flash-attn only speeds up the forced aligner (Transformers backend); vLLM brings its own attention
+# kernels. Off by default: without a matching prebuilt wheel it compiles from source for a long time.
+ARG BUNDLE_FLASH_ATTENTION=false
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip3 install -U pip setuptools wheel
