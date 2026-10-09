@@ -47,18 +47,22 @@ Folder names inside it are set with `ASR_MODEL_DIR` / `ALIGNER_MODEL_DIR`.
 > For faster startup, keep the models inside the WSL filesystem (e.g. `\\wsl$\Ubuntu\home\<you>\models`,
 > referenced in `.env` as the Linux path when running `docker compose` from WSL).
 
-### 3. Build and start
+Only `compose.yaml` and `.env` are needed on the server machine — the image is pulled from GHCR
+(`ghcr.io/dreamyfishmt/fast-qwen-asr-inference-vllm`). Set `IMAGE_TAG` in `.env` to pin a release
+(e.g. `1.2.3`) instead of `latest`.
+
+### 3. Start
 
 ```bash
-docker compose up -d --build
+docker compose up -d      # pulls the image on first run
 docker compose logs -f
 ```
 
 Wait for `Server is ready to accept requests.` — `docker compose ps` shows the container as `healthy` once
 models are loaded and warmed up.
 
-**!!FIRST START NOTICE!!** Building the image (flash-attn) and the first start (CUDA graph compile, loading
-the model into VRAM and warmup) can take a while. The vLLM compile cache is kept in the `vllm_cache` volume,
+**!!FIRST START NOTICE!!** The image is large (CUDA + vLLM + PyTorch), and the first start (CUDA graph compile,
+loading the model into VRAM and warmup) can take a while. The vLLM compile cache is kept in the `vllm_cache` volume,
 so subsequent starts are faster.
 
 The server is available at `http://127.0.0.1:8907` (bound to localhost only, as it has no authentication).
@@ -70,17 +74,52 @@ docker compose ps                 # status / health
 docker compose logs -f            # follow logs
 docker compose restart            # restart (e.g. after changing .env: use `up -d` instead)
 docker compose up -d              # apply .env changes
+docker compose pull && docker compose up -d   # update to the newest image for IMAGE_TAG
 docker compose down               # stop and remove the container
-docker compose build --no-cache   # rebuild the image
 ```
+
+### Build the image locally
+
+`compose.local.yaml` builds the image from this checkout (tagged `qwen3-asr-server:local`) instead of pulling it.
+Pass both files to every command:
+
+```bash
+docker compose -f compose.yaml -f compose.local.yaml up -d --build
+docker compose -f compose.yaml -f compose.local.yaml build --no-cache   # full rebuild
+```
+
+Building compiles/installs flash-attn and takes a while; `BUNDLE_FLASH_ATTENTION` and `MAX_JOBS` in `.env`
+control it.
 
 ### Development mode
 
-Run `server.py` from the working tree with auto-reload (no rebuild needed after edits):
+Run `server.py` from the working tree with auto-reload (no rebuild needed after edits). Works with the pulled
+image; add `-f compose.local.yaml` as well if you changed the Dockerfile:
 
 ```bash
 docker compose -f compose.yaml -f compose.dev.yaml up
 ```
+
+## Releasing
+
+Pushing a version tag builds the image with GitHub Actions (`.github/workflows/docker-publish.yml`)
+and pushes it to GHCR:
+
+```bash
+git tag v1.2.3
+git push origin v1.2.3
+```
+
+| Tag pushed | Image tags |
+|---|---|
+| `v1.2.3` | `1.2.3`, `1.2`, `1`, `latest` |
+| `v1.2.3-rc.1` | `1.2.3-rc.1` (doesn't move `latest`) |
+
+The workflow can also be started manually (Actions → Publish Docker image → Run workflow); a manual run on a
+branch publishes `latest` only.
+
+GHCR packages are private when first published. To pull without `docker login ghcr.io`, open the package
+(GitHub profile → Packages → fast-qwen-asr-inference-vllm → Package settings) and change its visibility to public.
 
 ## Configuration
 
@@ -92,6 +131,8 @@ Set in `.env` (see `.env.example`):
 | `ASR_MODEL_DIR` | `Qwen3-ASR-1.7B` | ASR model folder name inside `MODEL_DIR` |
 | `ENABLE_ALIGNER_MODEL` | `false` | Load the forced aligner (timestamps for `POST /transcribe`) |
 | `ALIGNER_MODEL_DIR` | `Qwen3-ForcedAligner-0.6B` | Aligner folder name inside `MODEL_DIR` |
+| `IMAGE` | `ghcr.io/dreamyfishmt/fast-qwen-asr-inference-vllm` | Image to pull |
+| `IMAGE_TAG` | `latest` | Image tag, e.g. `1.2.3` to pin a release |
 | `PORT` | `8907` | Host port |
 | `BIND_ADDR` | `127.0.0.1` | Host interface to bind; `0.0.0.0` exposes the server to the network |
 | `GPU_MEMORY_UTILIZATION` | `0.15` | Fraction of GPU memory vLLM may reserve |
@@ -99,8 +140,8 @@ Set in `.env` (see `.env.example`):
 | `STREAM_UNFIXED_CHUNK_NUM` | `2` | First N chunks are decoded without a text prefix |
 | `STREAM_UNFIXED_TOKEN_NUM` | `5` | Trailing tokens rolled back (re-decodable) on each step |
 | `PARTIAL_INTERVAL_MS` | `120` | Minimum interval between `partial` messages |
-| `BUNDLE_FLASH_ATTENTION` | `true` | Install flash-attn at build time |
-| `MAX_JOBS` | `8` | Parallel jobs if flash-attn has to be compiled from source |
+| `BUNDLE_FLASH_ATTENTION` | `true` | Local build only: install flash-attn |
+| `MAX_JOBS` | `8` | Local build only: parallel jobs if flash-attn has to be compiled from source |
 
 Further server settings (`MAX_CONCURRENT_INFER`, `MAX_CONCURRENT_DECODE`, `THREADPOOL_WORKERS`,
 `MAX_NEW_TOKENS`, `OPENCC_TW_CONFIG`, `OPENCC_HK_CONFIG`) are read from the environment by `server.py`

@@ -2,12 +2,9 @@ name: qwen3-asr
 
 services:
   asr:
-    build:
-      context: .
-      args:
-        BUNDLE_FLASH_ATTENTION: ${BUNDLE_FLASH_ATTENTION:-true}
-        MAX_JOBS: ${MAX_JOBS:-8}
-    image: ${IMAGE:-qwen3-asr-server:local}
+    # Prebuilt image published by .github/workflows/docker-publish.yml on v*.*.* tags.
+    # To build locally instead, add compose.local.yaml (see README).
+    image: ${IMAGE:-ghcr.io/dreamyfishmt/fast-qwen-asr-inference-vllm}:${IMAGE_TAG:-latest}
     container_name: ${CONTAINER:-qwen3-asr}
     ipc: host
     ports:
