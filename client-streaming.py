@@ -64,6 +64,7 @@ async def main():
     parser.add_argument("-e", "--endpoint", required=True, help="WebSocket Endpoint URL (e.g. ws://localhost:8907/transcribe-streaming)")
     parser.add_argument("-f", "--file", required=True, help="Path to raw PCM 16k 16-bit mono file (or WAV with correct format)")
     parser.add_argument("-l", "--language", help="Language hint, e.g. de, en, zh-CN, zh-TW (sent as ?language=...)")
+    parser.add_argument("-t", "--token", default=os.getenv("API_TOKEN"), help="API token (default: $API_TOKEN)")
     args = parser.parse_args()
 
     endpoint = args.endpoint
@@ -78,7 +79,8 @@ async def main():
     
     start_time = time.time()
     try:
-        async with websockets.connect(endpoint, max_size=None) as ws:
+        headers = {"Authorization": f"Bearer {args.token}"} if args.token else None
+        async with websockets.connect(endpoint, max_size=None, additional_headers=headers) as ws:
             await asyncio.gather(sender(ws, args.file), receiver(ws))
             
         end_time = time.time()

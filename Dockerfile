@@ -59,6 +59,9 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     fi
 
 COPY server.py /app/server.py
+COPY engines /app/engines
+
+ENV ASR_BACKEND=vllm
 
 EXPOSE 8000
 
