@@ -6,7 +6,7 @@ directory** mounted into the container (read-only, offline).
 
 | Image | Backend | Model | Hardware | Image size |
 |---|---|---|---|---|
-| **`…:latest-gpu` (recommended)** | ONNX Runtime + CUDA 13 | Qwen3-ASR-1.7B (int4) | NVIDIA GPU, driver R580+. See [Quick start: GPU](#quick-start-gpu-onnx-runtime) | ~3 GB |
+| **`…:latest-gpu` (recommended)** | ONNX Runtime + CUDA 13 | Qwen3-ASR-1.7B (int4 decoder, FP16 encoder) | NVIDIA GPU, driver R580+. See [Quick start: GPU](#quick-start-gpu-onnx-runtime) | ~3 GB |
 | `…:latest-cpu` | ONNX Runtime | Qwen3-ASR-0.6B (int4) | Any x86-64 / ARM64 CPU, 2+ GB RAM. See [CPU deployment](#cpu-deployment) | ~0.5 GB |
 | built locally (`compose.yaml`) | vLLM + `qwen-asr` | Qwen3-ASR-1.7B (FP8) | NVIDIA GPU (RTX 30 series or newer). See [vLLM image (advanced)](#vllm-image-advanced) | ~14 GB |
 
@@ -31,7 +31,7 @@ server below, then set the connection in the tray menu → **ASR Server…**:
 
 ## Quick start: GPU (ONNX Runtime)
 
-Qwen3-ASR-1.7B (int4) on an NVIDIA GPU with ONNX Runtime's CUDA execution provider. The image (`…:latest-gpu`,
+Qwen3-ASR-1.7B (int4 decoder, FP16 encoder) on an NVIDIA GPU with ONNX Runtime's CUDA execution provider. The image (`…:latest-gpu`,
 ~3 GB installed) contains no PyTorch or vLLM.
 
 **Requirements**
