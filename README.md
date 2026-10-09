@@ -130,15 +130,30 @@ The model folder combines two Hugging Face repos: the audio encoder, embeddings 
 text decoder from [`sorryhyun/qwen3-asr-onnx-gqa`](https://huggingface.co/sorryhyun/qwen3-asr-onnx-gqa)
 (built with GroupQueryAttention, so the cost per generated token stays almost flat as the utterance grows).
 
-1. Download the model:
+1. Download the model with [`scripts/download-models.sh`](scripts/download-models.sh) (needs the `hf` CLI or
+   [uv](https://docs.astral.sh/uv/)). It fetches exactly the files the server uses from the two repos, pinned to the
+   tested revisions, into `/srv/models/qwen3-asr-0.6b-onnx`:
+
+   ```bash
+   scripts/download-models.sh 0.6b /srv/models
+   ```
+
+   <details><summary>Manual commands (same files and revisions)</summary>
 
    ```bash
    D=/srv/models/qwen3-asr-0.6b-onnx
    uvx --from huggingface_hub hf download rhasspy/qwen3-asr-0.6b-onnx-int4-merged \
-     config.json tokenizer.json embed_tokens.bin encoder.int4.onnx encoder.int4.onnx.data --local-dir $D
+     config.json tokenizer.json embed_tokens.bin encoder.int4.onnx encoder.int4.onnx.data \
+     --revision 9ea8c26bbf497ef74a84ce19202ce62246af8ab4 --local-dir $D
    uvx --from huggingface_hub hf download sorryhyun/qwen3-asr-onnx-gqa \
-     decoder-0.6b-fp32.onnx decoder-0.6b-fp32.onnx.data --local-dir $D
+     decoder-0.6b-fp32.onnx decoder-0.6b-fp32.onnx.data \
+     --revision 075249f70b56cdded1cf4b189cbdde0fb77aeec1 --local-dir $D
    ```
+
+   </details>
+
+   If a download fails with a 401 from `cas-server.xethub.hf.co` (some proxies block Hugging Face's Xet storage),
+   set `HF_HUB_DISABLE_XET=1`; the script retries that way automatically.
 
    (The rhasspy repo's own `decoder_merged.int4.onnx` also works if present and no `decoder-*.onnx` is, but it is
    ~2× slower and more prone to repetition loops; `ONNX_DECODER` picks a decoder file explicitly.)
@@ -216,16 +231,25 @@ Requirements: an NVIDIA driver with CUDA 13 support (R580 or newer) and the
 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
 (on Windows: Docker Desktop with the WSL 2 backend).
 
-1. Download the model (~2.8 GB): encoder, embeddings and tokenizer of
+1. Download the model (~2.7 GB): encoder, embeddings and tokenizer of
    [`andrewleech/qwen3-asr-1.7b-onnx`](https://huggingface.co/andrewleech/qwen3-asr-1.7b-onnx), and the int4
-   GroupQueryAttention decoder with fp16 I/O from [`sorryhyun/qwen3-asr-onnx-gqa`](https://huggingface.co/sorryhyun/qwen3-asr-onnx-gqa):
+   GroupQueryAttention decoder with fp16 I/O from [`sorryhyun/qwen3-asr-onnx-gqa`](https://huggingface.co/sorryhyun/qwen3-asr-onnx-gqa),
+   pinned to the tested revisions:
 
    ```bash
-   D=/srv/models/qwen3-asr-1.7b-onnx   # Windows: D:/models/qwen3-asr-1.7b-onnx
-   uvx --from huggingface_hub hf download andrewleech/qwen3-asr-1.7b-onnx \
-     config.json tokenizer.json embed_tokens.bin encoder.onnx --local-dir $D
-   uvx --from huggingface_hub hf download sorryhyun/qwen3-asr-onnx-gqa \
-     decoder-1.7b-fp16.onnx decoder-1.7b-fp16.onnx.data --local-dir $D
+   scripts/download-models.sh 1.7b /srv/models   # -> /srv/models/qwen3-asr-1.7b-onnx
+   ```
+
+   On Windows without bash, run the equivalent commands (PowerShell; `uvx` from [uv](https://docs.astral.sh/uv/)):
+
+   ```powershell
+   $D = "D:/models/qwen3-asr-1.7b-onnx"
+   uvx --from huggingface_hub hf download andrewleech/qwen3-asr-1.7b-onnx `
+     config.json tokenizer.json embed_tokens.bin encoder.onnx `
+     --revision df916193ac67e59347769891a21e10d81d12acdd --local-dir $D
+   uvx --from huggingface_hub hf download sorryhyun/qwen3-asr-onnx-gqa `
+     decoder-1.7b-fp16.onnx decoder-1.7b-fp16.onnx.data `
+     --revision 075249f70b56cdded1cf4b189cbdde0fb77aeec1 --local-dir $D
    ```
 
    The 0.6B model folder from [CPU deployment](#cpu-deployment) works too (set `ASR_MODEL_DIR`).
