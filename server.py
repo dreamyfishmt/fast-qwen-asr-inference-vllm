@@ -168,6 +168,11 @@ async def load_models_background():
         logger.info(f"Loading ASR Model: {model_name}...")
         gpu_mem = float(os.getenv("GPU_MEMORY_UTILIZATION", "0.75"))
         max_new_tokens = int(os.getenv("MAX_NEW_TOKENS", "4096"))
+        # vLLM quantization method, e.g. "modelopt" for ModelOpt FP8 checkpoints. Empty = from checkpoint config.
+        quantization = os.getenv("VLLM_QUANTIZATION", "").strip() or None
+        llm_kwargs = {"quantization": quantization} if quantization else {}
+        if quantization:
+            logger.info(f"Using vLLM quantization: {quantization}")
 
         try:
             models["asr"] = await asyncio.to_thread(
@@ -175,6 +180,7 @@ async def load_models_background():
                 model=model_name,
                 gpu_memory_utilization=gpu_mem,
                 max_new_tokens=max_new_tokens,
+                **llm_kwargs,
             )
             logger.info("ASR Model loaded successfully.")
         except Exception as e:

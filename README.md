@@ -22,17 +22,30 @@ Put each model in its own folder inside one models directory, e.g.:
 
 ```
 D:/models/                      (or /srv/models on Linux)
-├── Qwen3-ASR-1.7B/
-└── Qwen3-ForcedAligner-0.6B/   (optional, only for timestamps)
+├── Qwen3-ASR-1.7B-fp8/         default ASR model (FP8)
+├── Qwen3-ASR-1.7B/             optional, original BF16 model
+└── Qwen3-ForcedAligner-0.6B/   optional, only for timestamps
 ```
 
-For example with the HuggingFace CLI (or `modelscope download` from ModelScope):
+For example with the HuggingFace CLI:
 
 ```bash
-uvx --from huggingface_hub hf download Qwen/Qwen3-ASR-1.7B --local-dir D:/models/Qwen3-ASR-1.7B
+uvx --from huggingface_hub hf download vrfai/Qwen3-ASR-1.7B-fp8 --local-dir D:/models/Qwen3-ASR-1.7B-fp8
 # optional
+uvx --from huggingface_hub hf download Qwen/Qwen3-ASR-1.7B --local-dir D:/models/Qwen3-ASR-1.7B
 uvx --from huggingface_hub hf download Qwen/Qwen3-ForcedAligner-0.6B --local-dir D:/models/Qwen3-ForcedAligner-0.6B
 ```
+
+#### Which model
+
+The server uses the `qwen-asr` package, which needs checkpoints in the **original Qwen3-ASR layout**
+(`config.json` with `thinker_config`, weights named `thinker.*`). The Transformers-native conversions
+(`Qwen/Qwen3-ASR-1.7B-hf`) and GGUF / MLX / ONNX / OpenVINO builds do **not** work.
+
+| Model | Size | Notes |
+|---|---|---|
+| [`vrfai/Qwen3-ASR-1.7B-fp8`](https://huggingface.co/vrfai/Qwen3-ASR-1.7B-fp8) (default) | ~2.5 GB weights | NVIDIA ModelOpt FP8, text decoder only (audio encoder and lm_head stay BF16). Reported WER 7.34% → 7.60% vs BF16 and ~25% higher single-request throughput (RTX 5090). Needs `VLLM_QUANTIZATION=modelopt` and an SM80+ GPU (RTX 30 series or newer); native FP8 compute on RTX 40/50 (SM89+), weight-only FP8 via Marlin on RTX 30 |
+| [`Qwen/Qwen3-ASR-1.7B`](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) | ~3.9 GB weights | Original BF16. Set `ASR_MODEL_DIR=Qwen3-ASR-1.7B` and an empty `VLLM_QUANTIZATION=` |
 
 ### 2. Configure
 
@@ -128,7 +141,8 @@ Set in `.env` (see `.env.example`):
 | Variable | Default | Description |
 |---|---|---|
 | `MODEL_DIR` | — (required) | Host directory with model folders, mounted read-only at `/models` |
-| `ASR_MODEL_DIR` | `Qwen3-ASR-1.7B` | ASR model folder name inside `MODEL_DIR` |
+| `ASR_MODEL_DIR` | `Qwen3-ASR-1.7B-fp8` | ASR model folder name inside `MODEL_DIR` |
+| `VLLM_QUANTIZATION` | `modelopt` | vLLM quantization method passed to the model loader; empty for unquantized (BF16) checkpoints |
 | `ENABLE_ALIGNER_MODEL` | `false` | Load the forced aligner (timestamps for `POST /transcribe`) |
 | `ALIGNER_MODEL_DIR` | `Qwen3-ForcedAligner-0.6B` | Aligner folder name inside `MODEL_DIR` |
 | `IMAGE` | `ghcr.io/dreamyfishmt/fast-qwen-asr-inference-vllm` | Image to pull |

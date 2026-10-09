@@ -16,7 +16,9 @@ services:
       TRANSFORMERS_OFFLINE: "1"
       VLLM_CACHE_ROOT: /cache/vllm
       ENABLE_ASR_MODEL: "true"
-      ASR_MODEL_NAME: /models/${ASR_MODEL_DIR:-Qwen3-ASR-1.7B}
+      ASR_MODEL_NAME: /models/${ASR_MODEL_DIR:-Qwen3-ASR-1.7B-fp8}
+      # "modelopt" for the default FP8 checkpoint; set VLLM_QUANTIZATION= (empty) for the BF16 model
+      VLLM_QUANTIZATION: ${VLLM_QUANTIZATION-modelopt}
       ENABLE_ALIGNER_MODEL: ${ENABLE_ALIGNER_MODEL:-false}
       ALIGNER_MODEL_NAME: /models/${ALIGNER_MODEL_DIR:-Qwen3-ForcedAligner-0.6B}
       GPU_MEMORY_UTILIZATION: ${GPU_MEMORY_UTILIZATION:-0.15}
