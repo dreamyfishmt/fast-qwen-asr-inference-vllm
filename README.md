@@ -9,10 +9,11 @@ Three images, same API:
 |---|---|---|---|---|
 | `…:latest-cpu` | ONNX Runtime | Qwen3-ASR-0.6B (int4) | Any x86-64 / ARM64 CPU, 2+ GB RAM. See [CPU deployment](#cpu-deployment) | ~0.5 GB |
 | `…:latest-gpu` | ONNX Runtime + CUDA 13 | Qwen3-ASR-1.7B (int4) | NVIDIA GPU, driver R580+. See [GPU deployment (ONNX Runtime)](#gpu-deployment-onnx-runtime) | ~3 GB |
-| `…:latest` | vLLM + `qwen-asr` | Qwen3-ASR-1.7B (FP8) | NVIDIA GPU (RTX 30 series or newer); high-throughput serving | ~14 GB |
+| built locally (`compose.yaml`) | vLLM + `qwen-asr` | Qwen3-ASR-1.7B (FP8) | NVIDIA GPU (RTX 30 series or newer); high-throughput serving | ~14 GB |
 
-For a single user (e.g. voice input), the two ONNX Runtime images are the simpler choice: they need no PyTorch
-or vLLM. Most of the vLLM image's size is PyTorch, vLLM and the full CUDA library set built for every GPU
+The two ONNX Runtime images are published on GHCR; the vLLM image is not (it is ~14 GB and slow to build in CI),
+so `compose.yaml` builds it locally. For a single user (e.g. voice input), the ONNX Runtime images are the simpler
+choice: they need no PyTorch or vLLM. Most of the vLLM image's size is PyTorch, vLLM and the full CUDA library set built for every GPU
 generation; that buys continuous batching for many concurrent users, which a dictation server doesn't need.
 
 The server runs with Docker Compose and loads the models from a **local model directory**
@@ -72,14 +73,13 @@ Folder names inside it are set with `ASR_MODEL_DIR` / `ALIGNER_MODEL_DIR`.
 > For faster startup, keep the models inside the WSL filesystem (e.g. `\\wsl$\Ubuntu\home\<you>\models`,
 > referenced in `.env` as the Linux path when running `docker compose` from WSL).
 
-Only `compose.yaml` and `.env` are needed on the server machine — the image is pulled from GHCR
-(`ghcr.io/dreamyfishmt/fast-qwen-asr-inference-vllm`). Set `IMAGE_TAG` in `.env` to pin a release
-(e.g. `1.2.3`) instead of `latest`.
+The sections below cover the vLLM image, which `compose.yaml` builds from this checkout. For prebuilt images,
+see [CPU deployment](#cpu-deployment) and [GPU deployment (ONNX Runtime)](#gpu-deployment-onnx-runtime).
 
-### 3. Start
+### 3. Build and start
 
 ```bash
-docker compose up -d      # pulls the image on first run
+docker compose up -d --build   # builds the image on first run
 docker compose logs -f
 ```
 
@@ -99,19 +99,12 @@ docker compose ps                 # status / health
 docker compose logs -f            # follow logs
 docker compose restart            # restart (e.g. after changing .env: use `up -d` instead)
 docker compose up -d              # apply .env changes
-docker compose pull && docker compose up -d   # update to the newest image for IMAGE_TAG
+git pull && docker compose up -d --build      # update: rebuild from the latest code
+docker compose build --no-cache               # full rebuild (also picks up new dependency versions)
 docker compose down               # stop and remove the container
 ```
 
-### Build the image locally
-
-`compose.local.yaml` builds the image from this checkout (tagged `qwen3-asr-server:local`) instead of pulling it.
-Pass both files to every command:
-
-```bash
-docker compose -f compose.yaml -f compose.local.yaml up -d --build
-docker compose -f compose.yaml -f compose.local.yaml build --no-cache   # full rebuild
-```
+### Image build options
 
 The image is based on `nvidia/cuda:12.8.0-runtime` (torch and vLLM bring their own CUDA kernels and libraries).
 flash-attn is not installed by default: vLLM has its own attention kernels, and flash-attn only speeds up the forced
@@ -121,8 +114,7 @@ parallel jobs).
 
 ### Development mode
 
-Run `server.py` from the working tree with auto-reload (no rebuild needed after edits). Works with the pulled
-image; add `-f compose.local.yaml` as well if you changed the Dockerfile:
+Run `server.py` from the working tree with auto-reload (no rebuild needed after edits):
 
 ```bash
 docker compose -f compose.yaml -f compose.dev.yaml up
@@ -280,11 +272,11 @@ git push origin v1.2.3
 
 | Tag pushed | Image tags |
 |---|---|
-| `v1.2.3` | vLLM: `1.2.3`, `1.2`, `1`, `latest` · ONNX CPU: `1.2.3-cpu`, …, `latest-cpu` · ONNX GPU: `1.2.3-gpu`, …, `latest-gpu` |
-| `v1.2.3-rc.1` | `1.2.3-rc.1`, `1.2.3-rc.1-cpu`, `1.2.3-rc.1-gpu` (don't move `latest`) |
+| `v1.2.3` | ONNX CPU: `1.2.3-cpu`, `1.2-cpu`, `1-cpu`, `latest-cpu` · ONNX GPU: `1.2.3-gpu`, `1.2-gpu`, `1-gpu`, `latest-gpu` |
+| `v1.2.3-rc.1` | `1.2.3-rc.1-cpu`, `1.2.3-rc.1-gpu` (don't move `latest-*`) |
 
 The workflow can also be started manually (Actions → Publish Docker image → Run workflow); a manual run on a
-branch publishes `latest` / `latest-cpu` / `latest-gpu` only. The CPU image is built for linux/amd64 and linux/arm64.
+branch publishes `latest-cpu` / `latest-gpu` only. The vLLM image is not published; build it with `compose.yaml`. The CPU image is built for linux/amd64 and linux/arm64.
 
 GHCR packages are private when first published. To pull without `docker login ghcr.io`, open the package
 (GitHub profile → Packages → fast-qwen-asr-inference-vllm → Package settings) and change its visibility to public.
@@ -300,8 +292,6 @@ Set in `.env` (see `.env.example`):
 | `VLLM_QUANTIZATION` | `modelopt` | vLLM quantization method passed to the model loader; empty for unquantized (BF16) checkpoints |
 | `ENABLE_ALIGNER_MODEL` | `false` | Load the forced aligner (timestamps for `POST /transcribe`) |
 | `ALIGNER_MODEL_DIR` | `Qwen3-ForcedAligner-0.6B` | Aligner folder name inside `MODEL_DIR` |
-| `IMAGE` | `ghcr.io/dreamyfishmt/fast-qwen-asr-inference-vllm` | Image to pull |
-| `IMAGE_TAG` | `latest` | Image tag, e.g. `1.2.3` to pin a release |
 | `PORT` | `8907` | Host port |
 | `BIND_ADDR` | `127.0.0.1` | Host interface to bind; `0.0.0.0` exposes the server to the network |
 | `GPU_MEMORY_UTILIZATION` | `0.15` | Fraction of GPU memory vLLM may reserve |

@@ -2,9 +2,16 @@ name: qwen3-asr
 
 services:
   asr:
-    # Prebuilt image published by .github/workflows/docker-publish.yml on v*.*.* tags.
-    # To build locally instead, add compose.local.yaml (see README).
-    image: ${IMAGE:-ghcr.io/dreamyfishmt/fast-qwen-asr-inference-vllm}:${IMAGE_TAG:-latest}
+    # vLLM image: built locally from this checkout (not published to GHCR; for a prebuilt GPU image
+    # see compose.gpu.yaml, which uses ONNX Runtime).
+    build:
+      context: .
+      args:
+        CUDA_FLAVOR: ${CUDA_FLAVOR:-runtime}
+        BUNDLE_FLASH_ATTENTION: ${BUNDLE_FLASH_ATTENTION:-false}
+        MAX_JOBS: ${MAX_JOBS:-8}
+    image: qwen3-asr-server:local
+    pull_policy: build
     container_name: ${CONTAINER:-qwen3-asr}
     ipc: host
     ports:
