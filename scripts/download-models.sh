@@ -4,9 +4,9 @@
 #   scripts/download-models.sh 0.6b /srv/models   # -> /srv/models/qwen3-asr-0.6b-onnx
 #   scripts/download-models.sh 1.7b /srv/models   # -> /srv/models/qwen3-asr-1.7b-onnx
 #
-# 0.6b files come from their original Hugging Face repos; 1.7b comes from dreamyfishmt/qwen3-asr-1.7b-onnx,
-# an unmodified repackaging of andrewleech/qwen3-asr-1.7b-onnx and sorryhyun/qwen3-asr-onnx-gqa. All are pinned
-# to the revisions the server was tested with. Uses `hf` if installed, otherwise `uvx --from huggingface_hub hf`.
+# 0.6b files come from their original Hugging Face repos, pinned to the revisions the server was tested with.
+# 1.7b is the latest revision of dreamyfishmt/qwen3-asr-1.7b-onnx (the whole repo, a ready-to-use model folder).
+# Uses `hf` if installed, otherwise `uvx --from huggingface_hub hf`.
 set -euo pipefail
 
 usage() { echo "usage: $0 {0.6b|1.7b} MODEL_DIR" >&2; exit 2; }
@@ -14,10 +14,11 @@ usage() { echo "usage: $0 {0.6b|1.7b} MODEL_DIR" >&2; exit 2; }
 size=$1
 root=$2
 
-# Revisions the server was tested with
+# Third-party repos: pinned to the revisions the server was tested with
 RHASSPY_0_6B=rhasspy/qwen3-asr-0.6b-onnx-int4-merged@9ea8c26bbf497ef74a84ce19202ce62246af8ab4
 SORRYHYUN_GQA=sorryhyun/qwen3-asr-onnx-gqa@075249f70b56cdded1cf4b189cbdde0fb77aeec1
-QWEN3_ASR_1_7B=dreamyfishmt/qwen3-asr-1.7b-onnx@f4a19c9705b87ea06685b1ffddd95772ffbde1b0
+# Our own repo: follows its latest revision
+QWEN3_ASR_1_7B=dreamyfishmt/qwen3-asr-1.7b-onnx@main
 
 if command -v hf >/dev/null 2>&1; then
     HF=(hf)
@@ -28,7 +29,7 @@ else
     exit 1
 fi
 
-# fetch REPO@REVISION DEST FILE...
+# fetch REPO@REVISION DEST [FILE...]  (no files = the whole repo)
 fetch() {
     local spec=$1 dest=$2
     shift 2
@@ -47,8 +48,7 @@ case $size in
         ;;
     1.7b)
         dest=$root/qwen3-asr-1.7b-onnx
-        fetch "$QWEN3_ASR_1_7B" "$dest" config.json tokenizer.json embed_tokens.bin encoder.onnx \
-            decoder-1.7b-fp16.onnx decoder-1.7b-fp16.onnx.data
+        fetch "$QWEN3_ASR_1_7B" "$dest" --exclude README.md --exclude .gitattributes
         ;;
     *) usage ;;
 esac

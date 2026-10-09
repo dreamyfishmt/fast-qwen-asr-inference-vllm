@@ -78,7 +78,7 @@ ENCODER_SEGMENT_WINDOWS = int(os.getenv("ONNX_ENCODER_SEGMENT_WINDOWS", "1"))
 MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "1024"))
 # Decoder graph file in the model dir (empty = auto-detect: gqa, then merged, then split)
 ONNX_DECODER = os.getenv("ONNX_DECODER", "").strip()
-# Encoder graph file (empty = encoder.int4.onnx, else encoder.onnx)
+# Encoder graph file (empty = auto: encoder.fp16.onnx on the GPU, then encoder.int4.onnx, then encoder.onnx)
 ONNX_ENCODER = os.getenv("ONNX_ENCODER", "").strip()
 # Execution provider: cpu, or cuda (onnxruntime-gpu; falls back to CPU if CUDA can't be loaded)
 ONNX_PROVIDER = os.getenv("ONNX_PROVIDER", "cpu").strip().lower()
@@ -487,7 +487,11 @@ class OnnxEngine(Engine):
                     logger.warning(f"Could not patch {name} for last-position logits ({e}); using it unchanged")
             return ort.InferenceSession(str(path), sess_options=opts, providers=providers)
 
-        encoder = ONNX_ENCODER or ("encoder.int4.onnx" if (d / "encoder.int4.onnx").is_file() else "encoder.onnx")
+        encoder = ONNX_ENCODER
+        if not encoder:
+            # fp16 weights halve the encoder size; on the CPU they run slower than fp32
+            candidates = (["encoder.fp16.onnx"] if device else []) + ["encoder.int4.onnx", "encoder.onnx"]
+            encoder = next((c for c in candidates if (d / c).is_file()), "encoder.onnx")
         self._encoder = session(encoder)
         if device and "CUDAExecutionProvider" not in self._encoder.get_providers():
             logger.warning("CUDA could not be initialized for ONNX Runtime; running on CPU")

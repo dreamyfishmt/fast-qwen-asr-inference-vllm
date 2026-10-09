@@ -59,25 +59,24 @@ curl -L -o .env https://raw.githubusercontent.com/dreamyfishmt/fast-qwen-asr-inf
 
 On Windows PowerShell, use `curl.exe` instead of `curl`. This already creates `.env`, so skip the `cp` in step 2.
 
-1. Download the model (~2.7 GB) from [`dreamyfishmt/qwen3-asr-1.7b-onnx`](https://huggingface.co/dreamyfishmt/qwen3-asr-1.7b-onnx),
-   pinned to the tested revision:
+1. Download the model folder [`dreamyfishmt/qwen3-asr-1.7b-onnx`](https://huggingface.co/dreamyfishmt/qwen3-asr-1.7b-onnx)
+   (~3.5 GB):
 
    ```bash
-   uvx --from huggingface_hub hf download dreamyfishmt/qwen3-asr-1.7b-onnx \
-     --revision f4a19c9705b87ea06685b1ffddd95772ffbde1b0 --local-dir /srv/models/qwen3-asr-1.7b-onnx
+   uvx --from huggingface_hub hf download dreamyfishmt/qwen3-asr-1.7b-onnx --local-dir /srv/models/qwen3-asr-1.7b-onnx
    # or: scripts/download-models.sh 1.7b /srv/models   # -> /srv/models/qwen3-asr-1.7b-onnx
    ```
 
    On Windows (PowerShell; `uvx` from [uv](https://docs.astral.sh/uv/)):
 
    ```powershell
-   uvx --from huggingface_hub hf download dreamyfishmt/qwen3-asr-1.7b-onnx --revision f4a19c9705b87ea06685b1ffddd95772ffbde1b0 --local-dir D:/models/qwen3-asr-1.7b-onnx
+   uvx --from huggingface_hub hf download dreamyfishmt/qwen3-asr-1.7b-onnx --local-dir D:/models/qwen3-asr-1.7b-onnx
    ```
 
-   The repo repackages, unmodified, the encoder, embeddings and tokenizer of
-   [`andrewleech/qwen3-asr-1.7b-onnx`](https://huggingface.co/andrewleech/qwen3-asr-1.7b-onnx) and the int4
-   GroupQueryAttention decoder with fp16 I/O from [`sorryhyun/qwen3-asr-onnx-gqa`](https://huggingface.co/sorryhyun/qwen3-asr-onnx-gqa);
-   see its [model card](https://huggingface.co/dreamyfishmt/qwen3-asr-1.7b-onnx) for the exact source revisions.
+   Run the same command again to update the model, then restart the container. The int4 GroupQueryAttention decoder
+   comes from [`sorryhyun/qwen3-asr-onnx-gqa`](https://huggingface.co/sorryhyun/qwen3-asr-onnx-gqa) and the
+   tokenizer and embeddings from [`andrewleech/qwen3-asr-1.7b-onnx`](https://huggingface.co/andrewleech/qwen3-asr-1.7b-onnx);
+   see the [model card](https://huggingface.co/dreamyfishmt/qwen3-asr-1.7b-onnx) for the current files and their sources.
 
    If the download fails with a 401 from `cas-server.xethub.hf.co` (some proxies block Hugging Face's Xet storage),
    set `HF_HUB_DISABLE_XET=1` and run it again (the script does this automatically).
@@ -114,7 +113,7 @@ Build locally instead of pulling: `docker compose -f compose.gpu.yaml -f compose
 | `ASR_MODEL_DIR` | `qwen3-asr-1.7b-onnx` | Model folder inside `MODEL_DIR` |
 | `ONNX_PROVIDER` | `cuda` (image default) | `cuda` or `cpu` |
 | `ONNX_DEVICE_ID` | `0` | GPU index |
-| `ONNX_DECODER` / `ONNX_ENCODER` | auto | Decoder / encoder file in the model folder; auto prefers `decoder-*fp16*` on the GPU and `decoder-*fp32*` on the CPU, and `encoder.int4.onnx` over `encoder.onnx` |
+| `ONNX_DECODER` / `ONNX_ENCODER` | auto | Decoder / encoder file in the model folder; auto prefers `decoder-*fp16*` on the GPU and `decoder-*fp32*` on the CPU; for the encoder, `encoder.fp16.onnx` (GPU only), then `encoder.int4.onnx`, then `encoder.onnx` |
 | `STREAM_PARTIAL_INTERVAL_SEC` / `STREAM_PARTIAL_MAX_SEC` | `1.0` / `60` | Partial cadence and cutoff |
 | `STREAM_FINAL_REUSE_PARTIAL` | `false` | Continue the final result from the last partial (see [CPU deployment](#cpu-deployment)) |
 | `API_TOKEN` | — | Optional shared secret; see [Authentication](#authentication) |
