@@ -78,6 +78,11 @@ ENCODER_SEGMENT_WINDOWS = int(os.getenv("ONNX_ENCODER_SEGMENT_WINDOWS", "1"))
 MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "1024"))
 # Decoder graph file in the model dir (empty = auto-detect: gqa, then merged, then split)
 ONNX_DECODER = os.getenv("ONNX_DECODER", "").strip()
+# Encoder graph file (empty = encoder.int4.onnx, else encoder.onnx)
+ONNX_ENCODER = os.getenv("ONNX_ENCODER", "").strip()
+# Execution provider: cpu, or cuda (onnxruntime-gpu; falls back to CPU if CUDA can't be loaded)
+ONNX_PROVIDER = os.getenv("ONNX_PROVIDER", "cpu").strip().lower()
+ONNX_DEVICE_ID = int(os.getenv("ONNX_DEVICE_ID", "0"))
 
 STREAM_PARTIALS = _env_bool("STREAM_PARTIALS", "true")
 STREAM_PARTIAL_INTERVAL_SEC = float(os.getenv("STREAM_PARTIAL_INTERVAL_SEC", "2.0"))
@@ -86,6 +91,9 @@ STREAM_PARTIAL_MAX_SEC = float(os.getenv("STREAM_PARTIAL_MAX_SEC", "20.0"))
 # STREAM_UNFIXED_TOKEN_NUM tokens) instead of decoding the whole utterance again; the first
 # STREAM_UNFIXED_CHUNK_NUM partials start from scratch. Same rollback strategy as qwen-asr's streaming.
 STREAM_REUSE_PARTIAL = _env_bool("STREAM_REUSE_PARTIAL", "true")
+# Whether the final result also continues from the last partial. Saves time on CPU, but an error in an
+# early partial can survive into the final text; with a GPU a full re-decode is cheap, so turn it off there.
+STREAM_FINAL_REUSE_PARTIAL = _env_bool("STREAM_FINAL_REUSE_PARTIAL", "true")
 STREAM_UNFIXED_CHUNK_NUM = int(os.getenv("STREAM_UNFIXED_CHUNK_NUM", "2"))
 STREAM_UNFIXED_TOKEN_NUM = int(os.getenv("STREAM_UNFIXED_TOKEN_NUM", "5"))
 
@@ -292,7 +300,7 @@ class OnnxStream(Stream):
         if self._worker is not None:
             self._worker.join()
         if self._n:
-            prefix = self._prefix()
+            prefix = self._prefix() if STREAM_FINAL_REUSE_PARTIAL else []
             with self._engine.infer_lock:
                 tokens = self._engine.transcribe_tokens(self._audio(), self._language, self._context, prefix=prefix)
             self.text, self.language = self._engine.parse(tokens, self._language)
@@ -300,15 +308,30 @@ class OnnxStream(Stream):
 
 
 class _GqaDecoder:
-    """onnxruntime-genai export: per-layer past_key_values.N.{key,value}, attention_mask [1, total]."""
+    """onnxruntime-genai export: per-layer past_key_values.N.{key,value}, attention_mask [1, total].
+
+    The graph's I/O may be float32 or float16 (e.g. decoder-1.7b-fp16.onnx); embeddings are cast to
+    match. With `device` set (CUDA), the KV cache stays on the GPU between steps via IOBinding and
+    only the logits are copied back.
+    """
 
     layout = "gqa"
 
-    def __init__(self, sess, kv_heads: int, head_dim: int):
+    def __init__(self, sess, kv_heads: int, head_dim: int, device: Optional[str] = None, device_id: int = 0):
+        import onnxruntime as ort
+
         self.sess = sess
-        self.past_names = [i.name for i in sess.get_inputs() if i.name.startswith("past_key_values.")]
-        self.outputs = ["logits"] + ["present." + n[len("past_key_values."):] for n in self.past_names]
-        self._empty = np.zeros((1, kv_heads, 0, head_dim), dtype=np.float32)
+        inputs = {i.name: i for i in sess.get_inputs()}
+        self.dtype = np.float16 if inputs["inputs_embeds"].type == "tensor(float16)" else np.float32
+        self.past_names = [n for n in inputs if n.startswith("past_key_values.")]
+        self.present_names = ["present." + n[len("past_key_values."):] for n in self.past_names]
+        self.outputs = ["logits"] + self.present_names
+        self.device, self.device_id = device, device_id
+        empty = np.zeros((1, kv_heads, 0, head_dim), dtype=self.dtype)
+        if device:
+            self._empty = ort.OrtValue.ortvalue_from_numpy(empty, device, device_id)
+        else:
+            self._empty = empty
 
     def empty_state(self):
         return ([self._empty] * len(self.past_names), 0)
@@ -316,11 +339,25 @@ class _GqaDecoder:
     def extend(self, state, embeds: np.ndarray):
         past, length = state
         total = length + embeds.shape[1]
-        out = self.sess.run(
-            self.outputs,
-            {"inputs_embeds": embeds, "attention_mask": np.ones((1, total), dtype=np.int64), **dict(zip(self.past_names, past))},
-        )
-        return out[0], (out[1:], total)
+        embeds = embeds.astype(self.dtype, copy=False)
+        mask = np.ones((1, total), dtype=np.int64)
+        if not self.device:
+            out = self.sess.run(
+                self.outputs, {"inputs_embeds": embeds, "attention_mask": mask, **dict(zip(self.past_names, past))}
+            )
+            return out[0], (out[1:], total)
+
+        binding = self.sess.io_binding()
+        binding.bind_cpu_input("inputs_embeds", embeds)
+        binding.bind_cpu_input("attention_mask", mask)
+        for name, value in zip(self.past_names, past):
+            binding.bind_ortvalue_input(name, value)
+        binding.bind_output("logits", "cpu")
+        for name in self.present_names:
+            binding.bind_output(name, self.device, self.device_id)
+        self.sess.run_with_iobinding(binding)
+        out = binding.get_outputs()
+        return out[0].numpy(), (out[1:], total)
 
 
 class _MergedDecoder:
@@ -389,6 +426,8 @@ class _SplitDecoder:
 class OnnxEngine(Engine):
     name = "onnx"
 
+    provider = ONNX_PROVIDER
+
     def __init__(self):
         self.model_dir = Path(os.getenv("ASR_MODEL_NAME", "/models/qwen3-asr-0.6b-onnx"))
         self._lock = threading.Lock()
@@ -405,7 +444,10 @@ class OnnxEngine(Engine):
         d = self.model_dir
         if not d.is_dir():
             raise RuntimeError(f"Model directory not found: {d}")
-        logger.info(f"Loading ONNX model from {d} ({ONNX_THREADS} threads, mem arena {'on' if ONNX_MEM_ARENA else 'off'})")
+        logger.info(
+            f"Loading ONNX model from {d} (provider {ONNX_PROVIDER}, {ONNX_THREADS} threads, "
+            f"mem arena {'on' if ONNX_MEM_ARENA else 'off'})"
+        )
 
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = ONNX_THREADS
@@ -414,6 +456,21 @@ class OnnxEngine(Engine):
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         opts.enable_cpu_mem_arena = ONNX_MEM_ARENA
         providers = ["CPUExecutionProvider"]
+        device = None
+        if ONNX_PROVIDER == "cuda":
+            # onnxruntime-gpu >= 1.21: load the CUDA/cuDNN libraries installed as nvidia-* pip packages
+            if hasattr(ort, "preload_dlls"):
+                try:
+                    ort.preload_dlls()
+                except Exception as e:
+                    logger.warning(f"onnxruntime.preload_dlls() failed: {e}")
+            if "CUDAExecutionProvider" in ort.get_available_providers():
+                providers = [("CUDAExecutionProvider", {"device_id": ONNX_DEVICE_ID}), "CPUExecutionProvider"]
+                device = "cuda"
+            else:
+                logger.warning("ONNX_PROVIDER=cuda but CUDAExecutionProvider is not available; using CPU")
+        elif ONNX_PROVIDER != "cpu":
+            raise RuntimeError(f"Unknown ONNX_PROVIDER: {ONNX_PROVIDER!r} (expected 'cpu' or 'cuda')")
 
         def session(name: str, last_logits: bool = False):
             path = d / name
@@ -430,8 +487,15 @@ class OnnxEngine(Engine):
                     logger.warning(f"Could not patch {name} for last-position logits ({e}); using it unchanged")
             return ort.InferenceSession(str(path), sess_options=opts, providers=providers)
 
-        self._encoder = session("encoder.int4.onnx")
+        encoder = ONNX_ENCODER or ("encoder.int4.onnx" if (d / "encoder.int4.onnx").is_file() else "encoder.onnx")
+        self._encoder = session(encoder)
+        if device and "CUDAExecutionProvider" not in self._encoder.get_providers():
+            logger.warning("CUDA could not be initialized for ONNX Runtime; running on CPU")
+            device = None
+            providers[:] = ["CPUExecutionProvider"]  # don't retry CUDA for the decoder
         self._encoder_inputs = [i.name for i in self._encoder.get_inputs()]
+        self._encoder_dtype = np.float16 if self._encoder.get_inputs()[0].type == "tensor(float16)" else np.float32
+        self.provider = "cuda" if device else "cpu"
 
         with open(d / "config.json", encoding="utf-8") as f:
             dec_cfg = json.load(f)["decoder"]
@@ -440,7 +504,9 @@ class OnnxEngine(Engine):
         if ONNX_DECODER:
             name = ONNX_DECODER
         elif gqa:
-            name = next((n for n in gqa if "fp32" in n), gqa[0])
+            # fp16 I/O suits the GPU; fp32 I/O is faster on CPU
+            prefer = "fp16" if device else "fp32"
+            name = next((n for n in gqa if prefer in n), gqa[0])
         elif (d / MERGED_DECODER).is_file():
             name = MERGED_DECODER
         else:
@@ -451,8 +517,10 @@ class OnnxEngine(Engine):
         elif name == MERGED_DECODER:
             self._decoder = _MergedDecoder(session(name, last_logits=True))
         else:
-            self._decoder = _GqaDecoder(session(name), dec_cfg["num_key_value_heads"], dec_cfg["head_dim"])
-        logger.info(f"Using {self._decoder.layout} decoder ({name})")
+            self._decoder = _GqaDecoder(
+                session(name), dec_cfg["num_key_value_heads"], dec_cfg["head_dim"], device, ONNX_DEVICE_ID
+            )
+        logger.info(f"Using {self._decoder.layout} decoder ({name}), encoder {encoder}, provider {self.provider}")
 
         hidden = dec_cfg["hidden_size"]
         # memory-mapped fp16 table: only the rows actually used are paged in
@@ -480,10 +548,10 @@ class OnnxEngine(Engine):
     # ---- encoder ----
 
     def _encode_mel(self, mel: np.ndarray) -> np.ndarray:
-        inputs = {self._encoder_inputs[0]: mel}
+        inputs = {self._encoder_inputs[0]: mel.astype(self._encoder_dtype, copy=False)}
         if len(self._encoder_inputs) > 1:
             inputs[self._encoder_inputs[1]] = np.array([mel.shape[2]], dtype=np.int64)
-        return self._encoder.run(None, inputs)[0]
+        return self._encoder.run(None, inputs)[0].astype(np.float32, copy=False)
 
     def encode(self, audio: np.ndarray, cancel: Optional[threading.Event] = None) -> np.ndarray:
         mel = log_mel_spectrogram(audio, self._mel_filters)
@@ -610,7 +678,9 @@ class OnnxEngine(Engine):
             "partial_interval_sec": STREAM_PARTIAL_INTERVAL_SEC,
             "partial_max_sec": STREAM_PARTIAL_MAX_SEC,
             "reuse_partial": STREAM_REUSE_PARTIAL,
+            "final_reuse_partial": STREAM_FINAL_REUSE_PARTIAL,
             "unfixed_chunk_num": STREAM_UNFIXED_CHUNK_NUM,
             "unfixed_token_num": STREAM_UNFIXED_TOKEN_NUM,
             "onnx_threads": ONNX_THREADS,
+            "provider": getattr(self, "provider", ONNX_PROVIDER),
         }

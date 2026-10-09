@@ -1,0 +1,30 @@
+# Qwen3-ASR server on an NVIDIA GPU via ONNX Runtime (CUDA 13). No PyTorch, no vLLM.
+# Built and started via compose.gpu.yaml; see README.md ("GPU deployment (ONNX Runtime)").
+# Needs an NVIDIA driver that supports CUDA 13 (R580 or newer) and the NVIDIA Container Toolkit.
+
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# CUDA/cuDNN come as nvidia-* wheels (loaded by onnxruntime.preload_dlls()); the driver library
+# (libcuda) is injected from the host by the NVIDIA Container Toolkit. cuBLAS is not part of
+# onnxruntime-gpu's [cuda] extra, so it is listed explicitly.
+RUN pip install \
+        "onnxruntime-gpu[cuda,cudnn]>=1.23" nvidia-cublas onnx "tokenizers>=0.20" numpy scipy \
+        fastapi "uvicorn>=0.30" websockets python-multipart soundfile psutil \
+        opencc-python-reimplemented
+
+RUN useradd --create-home --uid 1000 app
+WORKDIR /app
+COPY server.py /app/server.py
+COPY engines /app/engines
+
+USER app
+ENV ASR_BACKEND=onnx \
+    ONNX_PROVIDER=cuda \
+    MALLOC_ARENA_MAX=2
+EXPOSE 8000
+
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]

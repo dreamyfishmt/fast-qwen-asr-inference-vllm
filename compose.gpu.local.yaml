@@ -1,0 +1,9 @@
+# Local build overlay for the ONNX Runtime GPU image:
+#   docker compose -f compose.gpu.yaml -f compose.gpu.local.yaml up -d --build
+services:
+  asr:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    image: qwen3-asr-server:local-gpu
+    pull_policy: build

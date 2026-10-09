@@ -1,14 +1,19 @@
-# Fast Qwen3-ASR Inference Server (vLLM / ONNX CPU backends, FastAPI async processing)
+# Fast Qwen3-ASR Inference Server (ONNX Runtime / vLLM backends, FastAPI async processing)
 
 A containerized Qwen3-ASR inference server using FastAPI.
 Provides HTTP `/transcribe` and WebSocket `/transcribe-streaming` endpoints.
 
-Two images, same API:
+Three images, same API:
 
-| Image | Backend | Model | Hardware |
-|---|---|---|---|
-| `…:latest` | vLLM + `qwen-asr` | Qwen3-ASR-1.7B (FP8) | NVIDIA GPU (RTX 30 series or newer) |
-| `…:latest-cpu` | ONNX Runtime | Qwen3-ASR-0.6B (int4) | Any x86-64 / ARM64 CPU, 2+ GB RAM. See [CPU deployment](#cpu-deployment) |
+| Image | Backend | Model | Hardware | Image size (installed) |
+|---|---|---|---|---|
+| `…:latest-cpu` | ONNX Runtime | Qwen3-ASR-0.6B (int4) | Any x86-64 / ARM64 CPU, 2+ GB RAM. See [CPU deployment](#cpu-deployment) | ~0.5 GB |
+| `…:latest-gpu` | ONNX Runtime + CUDA 13 | Qwen3-ASR-1.7B (int4) | NVIDIA GPU, driver R580+. See [GPU deployment (ONNX Runtime)](#gpu-deployment-onnx-runtime) | ~3 GB |
+| `…:latest` | vLLM + `qwen-asr` | Qwen3-ASR-1.7B (FP8) | NVIDIA GPU (RTX 30 series or newer); high-throughput serving | ~14 GB |
+
+For a single user (e.g. voice input), the two ONNX Runtime images are the simpler choice: they need no PyTorch
+or vLLM. Most of the vLLM image's size is PyTorch, vLLM and the full CUDA library set built for every GPU
+generation; that buys continuous batching for many concurrent users, which a dictation server doesn't need.
 
 The server runs with Docker Compose and loads the models from a **local model directory**
 mounted into the container (read-only, offline — the HuggingFace Hub is never contacted).
@@ -199,6 +204,7 @@ utterance. 2 GB of RAM works for dictation-length audio; 4 GB leaves headroom fo
 | `STREAM_PARTIAL_INTERVAL_SEC` | `2.0` | Seconds of new audio between partials |
 | `STREAM_PARTIAL_MAX_SEC` | `20` | No partials once the utterance is longer than this |
 | `STREAM_REUSE_PARTIAL` | `true` | Continue from the previous partial instead of decoding from scratch |
+| `STREAM_FINAL_REUSE_PARTIAL` | `true` | The final result also continues from the last partial (faster on CPU; an error in an early partial can survive into the final text) |
 | `STREAM_UNFIXED_CHUNK_NUM` / `STREAM_UNFIXED_TOKEN_NUM` | `2` / `5` | First N partials start from scratch; last K tokens are re-decoded |
 | `STREAM_MAX_SEC` | `60` | Audio beyond this per utterance is dropped (an `info` message is sent) |
 | `DOMAIN` | — | Domain for the `tls` profile (Caddy, automatic HTTPS) |
@@ -208,6 +214,52 @@ Build the CPU image locally instead of pulling it:
 
 The CPU image has no ffmpeg: `POST /transcribe` accepts WAV/FLAC/OGG/MP3 (what libsndfile reads), and forced
 alignment is not available.
+
+## GPU deployment (ONNX Runtime)
+
+The same ONNX Runtime backend as the CPU image, on an NVIDIA GPU via the CUDA execution provider, with
+Qwen3-ASR-1.7B. The image (`…:latest-gpu`, ~3 GB installed) contains no PyTorch or vLLM.
+
+Requirements: an NVIDIA driver with CUDA 13 support (R580 or newer) and the
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
+(on Windows: Docker Desktop with the WSL 2 backend).
+
+1. Download the model (~2.8 GB): encoder, embeddings and tokenizer of
+   [`andrewleech/qwen3-asr-1.7b-onnx`](https://huggingface.co/andrewleech/qwen3-asr-1.7b-onnx), and the int4
+   GroupQueryAttention decoder with fp16 I/O from [`sorryhyun/qwen3-asr-onnx-gqa`](https://huggingface.co/sorryhyun/qwen3-asr-onnx-gqa):
+
+   ```bash
+   D=/srv/models/qwen3-asr-1.7b-onnx   # Windows: D:/models/qwen3-asr-1.7b-onnx
+   uvx --from huggingface_hub hf download andrewleech/qwen3-asr-1.7b-onnx \
+     config.json tokenizer.json embed_tokens.bin encoder.onnx --local-dir $D
+   uvx --from huggingface_hub hf download sorryhyun/qwen3-asr-onnx-gqa \
+     decoder-1.7b-fp16.onnx decoder-1.7b-fp16.onnx.data --local-dir $D
+   ```
+
+   The 0.6B model folder from [CPU deployment](#cpu-deployment) works too (set `ASR_MODEL_DIR`).
+
+2. Get `compose.gpu.yaml` (and `Caddyfile` for HTTPS) and `.env.gpu.example` from this repo, then
+   `cp .env.gpu.example .env` and set `MODEL_DIR` (plus `API_TOKEN` / `DOMAIN` if other machines connect).
+
+3. `docker compose -f compose.gpu.yaml up -d` (add `--profile tls` for Caddy/HTTPS), then check
+   `docker compose -f compose.gpu.yaml logs` for `provider cuda`. If CUDA can't be initialized (driver too old,
+   no GPU visible to the container), the server logs a warning and falls back to the CPU.
+
+On the GPU a full transcription takes a fraction of a second, so the defaults differ from the CPU image:
+partials every second for the whole utterance, and the final result is always a fresh full decode
+(`STREAM_FINAL_REUSE_PARTIAL=false`). The KV cache stays on the GPU between decode steps.
+
+Build locally instead of pulling: `docker compose -f compose.gpu.yaml -f compose.gpu.local.yaml up -d --build`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `ASR_MODEL_DIR` | `qwen3-asr-1.7b-onnx` | Model folder inside `MODEL_DIR` |
+| `ONNX_PROVIDER` | `cuda` (image default) | `cuda` or `cpu` |
+| `ONNX_DEVICE_ID` | `0` | GPU index |
+| `ONNX_DECODER` / `ONNX_ENCODER` | auto | Decoder / encoder file in the model folder; auto prefers `decoder-*fp16*` on the GPU and `decoder-*fp32*` on the CPU, and `encoder.int4.onnx` over `encoder.onnx` |
+| `STREAM_PARTIAL_INTERVAL_SEC` / `STREAM_PARTIAL_MAX_SEC` | `1.0` / `60` | Partial cadence and cutoff |
+| `STREAM_FINAL_REUSE_PARTIAL` | `false` | See [CPU deployment](#cpu-deployment) |
+| `STREAM_MAX_SEC` | `120` | Audio beyond this per utterance is dropped |
 
 ## Authentication
 
@@ -228,11 +280,11 @@ git push origin v1.2.3
 
 | Tag pushed | Image tags |
 |---|---|
-| `v1.2.3` | GPU: `1.2.3`, `1.2`, `1`, `latest` · CPU: `1.2.3-cpu`, `1.2-cpu`, `1-cpu`, `latest-cpu` |
-| `v1.2.3-rc.1` | `1.2.3-rc.1`, `1.2.3-rc.1-cpu` (don't move `latest`) |
+| `v1.2.3` | vLLM: `1.2.3`, `1.2`, `1`, `latest` · ONNX CPU: `1.2.3-cpu`, …, `latest-cpu` · ONNX GPU: `1.2.3-gpu`, …, `latest-gpu` |
+| `v1.2.3-rc.1` | `1.2.3-rc.1`, `1.2.3-rc.1-cpu`, `1.2.3-rc.1-gpu` (don't move `latest`) |
 
 The workflow can also be started manually (Actions → Publish Docker image → Run workflow); a manual run on a
-branch publishes `latest` / `latest-cpu` only. The CPU image is built for linux/amd64 and linux/arm64.
+branch publishes `latest` / `latest-cpu` / `latest-gpu` only. The CPU image is built for linux/amd64 and linux/arm64.
 
 GHCR packages are private when first published. To pull without `docker login ghcr.io`, open the package
 (GitHub profile → Packages → fast-qwen-asr-inference-vllm → Package settings) and change its visibility to public.

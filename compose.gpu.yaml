@@ -1,0 +1,62 @@
+# NVIDIA GPU deployment with ONNX Runtime (Qwen3-ASR-1.7B int4). See README.md ("GPU deployment (ONNX Runtime)").
+#   docker compose -f compose.gpu.yaml up -d                  # HTTP/WS on PORT
+#   docker compose -f compose.gpu.yaml --profile tls up -d    # + Caddy with automatic HTTPS for DOMAIN
+name: qwen3-asr-gpu
+
+services:
+  asr:
+    image: ${IMAGE:-ghcr.io/dreamyfishmt/fast-qwen-asr-inference-vllm}:${IMAGE_TAG:-latest-gpu}
+    container_name: ${CONTAINER:-qwen3-asr-gpu}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${PORT:-8907}:8000"
+    environment:
+      ASR_BACKEND: onnx
+      ONNX_PROVIDER: cuda
+      ONNX_DEVICE_ID: ${ONNX_DEVICE_ID:-0}
+      ASR_MODEL_NAME: /models/${ASR_MODEL_DIR:-qwen3-asr-1.7b-onnx}
+      # Optional shared secret; clients send "Authorization: Bearer <API_TOKEN>"
+      API_TOKEN: ${API_TOKEN:-}
+      MAX_CONCURRENT_INFER: "1"
+      STREAM_PARTIALS: ${STREAM_PARTIALS:-true}
+      STREAM_PARTIAL_INTERVAL_SEC: ${STREAM_PARTIAL_INTERVAL_SEC:-1.0}
+      STREAM_PARTIAL_MAX_SEC: ${STREAM_PARTIAL_MAX_SEC:-60}
+      STREAM_REUSE_PARTIAL: ${STREAM_REUSE_PARTIAL:-true}
+      # A full re-decode for the final result is cheap on a GPU and avoids carrying over partial errors
+      STREAM_FINAL_REUSE_PARTIAL: ${STREAM_FINAL_REUSE_PARTIAL:-false}
+      STREAM_MAX_SEC: ${STREAM_MAX_SEC:-120}
+      THREADPOOL_WORKERS: "8"
+    volumes:
+      - ${MODEL_DIR:?set MODEL_DIR in .env}:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=3).status == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 180s
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["tls"]
+    depends_on: [asr]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env for the tls profile}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
