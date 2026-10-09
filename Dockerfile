@@ -30,7 +30,9 @@ WORKDIR /app
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip3 install -U pip setuptools wheel
 
-RUN apt remove python3-blinker -y
+# A distro-installed python3-blinker (no pip metadata) makes pip fail when a dependency upgrades it.
+# The runtime base doesn't ship it, but derived bases (e.g. with software-properties-common) may.
+RUN if dpkg -s python3-blinker >/dev/null 2>&1; then apt-get remove -y python3-blinker; fi
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip3 install -U "qwen-asr[vllm]" fastapi uvicorn python-multipart requests soundfile scipy websockets psutil \
