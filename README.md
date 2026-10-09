@@ -1,129 +1,99 @@
-# Fast Qwen3-ASR Inference Server (ONNX Runtime / vLLM backends, FastAPI async processing)
+# Fast Qwen3-ASR Inference Server
 
-A containerized Qwen3-ASR inference server using FastAPI.
-Provides HTTP `/transcribe` and WebSocket `/transcribe-streaming` endpoints.
+A containerized [Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR) speech recognition server (FastAPI) with HTTP
+`/transcribe` and real-time WebSocket `/transcribe-streaming` endpoints. Models are read from a **local model
+directory** mounted into the container (read-only, offline).
 
-Three images, same API:
-
-| Image | Backend | Model | Hardware | Image size (installed) |
+| Image | Backend | Model | Hardware | Image size |
 |---|---|---|---|---|
+| **`…:latest-gpu` (recommended)** | ONNX Runtime + CUDA 13 | Qwen3-ASR-1.7B (int4) | NVIDIA GPU, driver R580+. See [Quick start: GPU](#quick-start-gpu-onnx-runtime) | ~3 GB |
 | `…:latest-cpu` | ONNX Runtime | Qwen3-ASR-0.6B (int4) | Any x86-64 / ARM64 CPU, 2+ GB RAM. See [CPU deployment](#cpu-deployment) | ~0.5 GB |
-| `…:latest-gpu` | ONNX Runtime + CUDA 13 | Qwen3-ASR-1.7B (int4) | NVIDIA GPU, driver R580+. See [GPU deployment (ONNX Runtime)](#gpu-deployment-onnx-runtime) | ~3 GB |
-| built locally (`compose.yaml`) | vLLM + `qwen-asr` | Qwen3-ASR-1.7B (FP8) | NVIDIA GPU (RTX 30 series or newer); high-throughput serving | ~14 GB |
+| built locally (`compose.yaml`) | vLLM + `qwen-asr` | Qwen3-ASR-1.7B (FP8) | NVIDIA GPU (RTX 30 series or newer). See [vLLM image (advanced)](#vllm-image-advanced) | ~14 GB |
 
-The two ONNX Runtime images are published on GHCR; the vLLM image is not (it is ~14 GB and slow to build in CI),
-so `compose.yaml` builds it locally. For a single user (e.g. voice input), the ONNX Runtime images are the simpler
-choice: they need no PyTorch or vLLM. Most of the vLLM image's size is PyTorch, vLLM and the full CUDA library set built for every GPU
-generation; that buys continuous batching for many concurrent users, which a dictation server doesn't need.
+Images: `ghcr.io/dreamyfishmt/fast-qwen-asr-inference-vllm`. All three serve the same API.
 
-The server runs with Docker Compose and loads the models from a **local model directory**
-mounted into the container (read-only, offline — the HuggingFace Hub is never contacted).
+The ONNX Runtime images need no PyTorch or vLLM and are the right fit for one user or a few (e.g. voice input).
+The vLLM image is mostly PyTorch, vLLM and the full CUDA library set built for every GPU generation; that buys
+continuous batching for many concurrent users. It is not published (too large to build in CI), so `compose.yaml`
+builds it locally.
 
-## Requirements
+## Quick start: GPU (ONNX Runtime)
 
-- NVIDIA GPU + driver
+Qwen3-ASR-1.7B (int4) on an NVIDIA GPU with ONNX Runtime's CUDA execution provider. The image (`…:latest-gpu`,
+~3 GB installed) contains no PyTorch or vLLM.
+
+**Requirements**
+
+- NVIDIA GPU with a driver that supports CUDA 13 (R580 or newer)
 - Docker with Compose v2 and GPU support:
   - Linux: [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
   - Windows: Docker Desktop with the WSL 2 backend (GPU support is built in)
-- [uv](https://docs.astral.sh/uv/) — only for the local test/benchmark clients
+- [uv](https://docs.astral.sh/uv/) or the `hf` CLI, to download the model
 
-## Setup
+1. Download the model (~2.7 GB): encoder, embeddings and tokenizer of
+   [`andrewleech/qwen3-asr-1.7b-onnx`](https://huggingface.co/andrewleech/qwen3-asr-1.7b-onnx), and the int4
+   GroupQueryAttention decoder with fp16 I/O from [`sorryhyun/qwen3-asr-onnx-gqa`](https://huggingface.co/sorryhyun/qwen3-asr-onnx-gqa),
+   pinned to the tested revisions:
 
-### 1. Download the models
+   ```bash
+   scripts/download-models.sh 1.7b /srv/models   # -> /srv/models/qwen3-asr-1.7b-onnx
+   ```
 
-Put each model in its own folder inside one models directory, e.g.:
+   On Windows without bash, run the equivalent commands (PowerShell; `uvx` from [uv](https://docs.astral.sh/uv/)):
 
-```
-D:/models/                      (or /srv/models on Linux)
-├── Qwen3-ASR-1.7B-fp8/         default ASR model (FP8)
-├── Qwen3-ASR-1.7B/             optional, original BF16 model
-└── Qwen3-ForcedAligner-0.6B/   optional, only for timestamps
-```
+   ```powershell
+   $D = "D:/models/qwen3-asr-1.7b-onnx"
+   uvx --from huggingface_hub hf download andrewleech/qwen3-asr-1.7b-onnx `
+     config.json tokenizer.json embed_tokens.bin encoder.onnx `
+     --revision df916193ac67e59347769891a21e10d81d12acdd --local-dir $D
+   uvx --from huggingface_hub hf download sorryhyun/qwen3-asr-onnx-gqa `
+     decoder-1.7b-fp16.onnx decoder-1.7b-fp16.onnx.data `
+     --revision 075249f70b56cdded1cf4b189cbdde0fb77aeec1 --local-dir $D
+   ```
 
-For example with the HuggingFace CLI:
+   The 0.6B model folder from [CPU deployment](#cpu-deployment) works on the GPU too (set `ASR_MODEL_DIR`).
 
-```bash
-uvx --from huggingface_hub hf download vrfai/Qwen3-ASR-1.7B-fp8 --local-dir D:/models/Qwen3-ASR-1.7B-fp8
-# optional
-uvx --from huggingface_hub hf download Qwen/Qwen3-ASR-1.7B --local-dir D:/models/Qwen3-ASR-1.7B
-uvx --from huggingface_hub hf download Qwen/Qwen3-ForcedAligner-0.6B --local-dir D:/models/Qwen3-ForcedAligner-0.6B
-```
+2. Get `compose.gpu.yaml` (and `Caddyfile` for HTTPS) and `.env.gpu.example` from this repo, then
+   `cp .env.gpu.example .env` and set `MODEL_DIR` (use forward slashes on Windows, e.g. `D:/models`).
 
-#### Which model
+   > **Windows tip:** loading models from a Windows drive goes through the WSL 2 file share and is slow.
+   > For faster startup, keep the models inside the WSL filesystem (e.g. `\\wsl$\Ubuntu\home\<you>\models`),
+   > referenced in `.env` as the Linux path when running `docker compose` from WSL.
 
-The server uses the `qwen-asr` package, which needs checkpoints in the **original Qwen3-ASR layout**
-(`config.json` with `thinker_config`, weights named `thinker.*`). The Transformers-native conversions
-(`Qwen/Qwen3-ASR-1.7B-hf`) and GGUF / MLX / ONNX / OpenVINO builds do **not** work.
+3. Start:
 
-| Model | Size | Notes |
+   ```bash
+   docker compose -f compose.gpu.yaml up -d
+   docker compose -f compose.gpu.yaml logs -f   # look for "provider cuda", then "Server is ready"
+   ```
+
+   The server listens on `http://127.0.0.1:8907` (this machine only). If CUDA can't be initialized (driver too
+   old, no GPU visible to the container), it logs a warning and falls back to the CPU.
+
+   For other machines, set `API_TOKEN` and either `BIND_ADDR=0.0.0.0` (LAN, plain WS) or a `DOMAIN` with
+   `--profile tls` (Caddy with automatic HTTPS, as in [CPU deployment](#cpu-deployment)).
+
+On the GPU a full transcription takes a fraction of a second, so the defaults differ from the CPU image:
+partials every second for the whole utterance, and the final result is always a fresh full decode
+(`STREAM_FINAL_REUSE_PARTIAL=false`). The KV cache stays on the GPU between decode steps.
+
+Build locally instead of pulling: `docker compose -f compose.gpu.yaml -f compose.gpu.local.yaml up -d --build`.
+
+| Variable | Default | Description |
 |---|---|---|
-| [`vrfai/Qwen3-ASR-1.7B-fp8`](https://huggingface.co/vrfai/Qwen3-ASR-1.7B-fp8) (default) | ~2.5 GB weights | NVIDIA ModelOpt FP8, text decoder only (audio encoder and lm_head stay BF16). Reported WER 7.34% → 7.60% vs BF16 and ~25% higher single-request throughput (RTX 5090). Needs `VLLM_QUANTIZATION=modelopt` and an SM80+ GPU (RTX 30 series or newer); native FP8 compute on RTX 40/50 (SM89+), weight-only FP8 via Marlin on RTX 30 |
-| [`Qwen/Qwen3-ASR-1.7B`](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) | ~3.9 GB weights | Original BF16. Set `ASR_MODEL_DIR=Qwen3-ASR-1.7B` and an empty `VLLM_QUANTIZATION=` |
-
-### 2. Configure
-
-```bash
-cp .env.example .env
-```
-
-Set at least `MODEL_DIR` in `.env` (use forward slashes on Windows, e.g. `D:/models`).
-Folder names inside it are set with `ASR_MODEL_DIR` / `ALIGNER_MODEL_DIR`.
-
-> **Windows tip:** loading models from a Windows drive goes through the WSL 2 file share and is slow.
-> For faster startup, keep the models inside the WSL filesystem (e.g. `\\wsl$\Ubuntu\home\<you>\models`,
-> referenced in `.env` as the Linux path when running `docker compose` from WSL).
-
-The sections below cover the vLLM image, which `compose.yaml` builds from this checkout. For prebuilt images,
-see [CPU deployment](#cpu-deployment) and [GPU deployment (ONNX Runtime)](#gpu-deployment-onnx-runtime).
-
-### 3. Build and start
-
-```bash
-docker compose up -d --build   # builds the image on first run
-docker compose logs -f
-```
-
-Wait for `Server is ready to accept requests.` — `docker compose ps` shows the container as `healthy` once
-models are loaded and warmed up.
-
-**!!FIRST START NOTICE!!** The image is large (CUDA + vLLM + PyTorch), and the first start (CUDA graph compile,
-loading the model into VRAM and warmup) can take a while. The vLLM compile cache is kept in the `vllm_cache` volume,
-so subsequent starts are faster.
-
-The server is available at `http://127.0.0.1:8907` (bound to localhost only, as it has no authentication).
-
-### Common commands
-
-```bash
-docker compose ps                 # status / health
-docker compose logs -f            # follow logs
-docker compose restart            # restart (e.g. after changing .env: use `up -d` instead)
-docker compose up -d              # apply .env changes
-git pull && docker compose up -d --build      # update: rebuild from the latest code
-docker compose build --no-cache               # full rebuild (also picks up new dependency versions)
-docker compose down               # stop and remove the container
-```
-
-### Image build options
-
-The image is based on `nvidia/cuda:12.8.0-runtime` (torch and vLLM bring their own CUDA kernels and libraries).
-flash-attn is not installed by default: vLLM has its own attention kernels, and flash-attn only speeds up the forced
-aligner. To include it, set `CUDA_FLAVOR=devel` (adds the CUDA toolkit, needed to compile it) and
-`BUNDLE_FLASH_ATTENTION=true` in `.env`; compiling it takes a long time and a lot of RAM (`MAX_JOBS` limits the
-parallel jobs).
-
-### Development mode
-
-Run `server.py` from the working tree with auto-reload (no rebuild needed after edits):
-
-```bash
-docker compose -f compose.yaml -f compose.dev.yaml up
-```
+| `ASR_MODEL_DIR` | `qwen3-asr-1.7b-onnx` | Model folder inside `MODEL_DIR` |
+| `ONNX_PROVIDER` | `cuda` (image default) | `cuda` or `cpu` |
+| `ONNX_DEVICE_ID` | `0` | GPU index |
+| `ONNX_DECODER` / `ONNX_ENCODER` | auto | Decoder / encoder file in the model folder; auto prefers `decoder-*fp16*` on the GPU and `decoder-*fp32*` on the CPU, and `encoder.int4.onnx` over `encoder.onnx` |
+| `STREAM_PARTIAL_INTERVAL_SEC` / `STREAM_PARTIAL_MAX_SEC` | `1.0` / `60` | Partial cadence and cutoff |
+| `STREAM_FINAL_REUSE_PARTIAL` | `false` | Continue the final result from the last partial (see [CPU deployment](#cpu-deployment)) |
+| `API_TOKEN` | — | Optional shared secret; see [Authentication](#authentication) |
+| `STREAM_MAX_SEC` | `120` | Audio beyond this per utterance is dropped |
 
 ## CPU deployment
 
-For servers without a GPU, e.g. a small VPS that clients reach over the internet. Uses ONNX Runtime with
-Qwen3-ASR-0.6B quantized to int4 (~840 MB of model files); the image has no PyTorch or CUDA.
+For servers without a GPU, e.g. a small VPS that clients reach over the internet. The same ONNX Runtime backend as
+the GPU image, with Qwen3-ASR-0.6B quantized to int4 (~840 MB of model files); the image has no PyTorch or CUDA.
 
 The model folder combines two Hugging Face repos: the audio encoder, embeddings and tokenizer from
 [`rhasspy/qwen3-asr-0.6b-onnx-int4-merged`](https://huggingface.co/rhasspy/qwen3-asr-0.6b-onnx-int4-merged), and the
@@ -222,114 +192,12 @@ Build the CPU image locally instead of pulling it:
 The CPU image has no ffmpeg: `POST /transcribe` accepts WAV/FLAC/OGG/MP3 (what libsndfile reads), and forced
 alignment is not available.
 
-## GPU deployment (ONNX Runtime)
-
-The same ONNX Runtime backend as the CPU image, on an NVIDIA GPU via the CUDA execution provider, with
-Qwen3-ASR-1.7B. The image (`…:latest-gpu`, ~3 GB installed) contains no PyTorch or vLLM.
-
-Requirements: an NVIDIA driver with CUDA 13 support (R580 or newer) and the
-[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
-(on Windows: Docker Desktop with the WSL 2 backend).
-
-1. Download the model (~2.7 GB): encoder, embeddings and tokenizer of
-   [`andrewleech/qwen3-asr-1.7b-onnx`](https://huggingface.co/andrewleech/qwen3-asr-1.7b-onnx), and the int4
-   GroupQueryAttention decoder with fp16 I/O from [`sorryhyun/qwen3-asr-onnx-gqa`](https://huggingface.co/sorryhyun/qwen3-asr-onnx-gqa),
-   pinned to the tested revisions:
-
-   ```bash
-   scripts/download-models.sh 1.7b /srv/models   # -> /srv/models/qwen3-asr-1.7b-onnx
-   ```
-
-   On Windows without bash, run the equivalent commands (PowerShell; `uvx` from [uv](https://docs.astral.sh/uv/)):
-
-   ```powershell
-   $D = "D:/models/qwen3-asr-1.7b-onnx"
-   uvx --from huggingface_hub hf download andrewleech/qwen3-asr-1.7b-onnx `
-     config.json tokenizer.json embed_tokens.bin encoder.onnx `
-     --revision df916193ac67e59347769891a21e10d81d12acdd --local-dir $D
-   uvx --from huggingface_hub hf download sorryhyun/qwen3-asr-onnx-gqa `
-     decoder-1.7b-fp16.onnx decoder-1.7b-fp16.onnx.data `
-     --revision 075249f70b56cdded1cf4b189cbdde0fb77aeec1 --local-dir $D
-   ```
-
-   The 0.6B model folder from [CPU deployment](#cpu-deployment) works too (set `ASR_MODEL_DIR`).
-
-2. Get `compose.gpu.yaml` (and `Caddyfile` for HTTPS) and `.env.gpu.example` from this repo, then
-   `cp .env.gpu.example .env` and set `MODEL_DIR` (plus `API_TOKEN` / `DOMAIN` if other machines connect).
-
-3. `docker compose -f compose.gpu.yaml up -d` (add `--profile tls` for Caddy/HTTPS), then check
-   `docker compose -f compose.gpu.yaml logs` for `provider cuda`. If CUDA can't be initialized (driver too old,
-   no GPU visible to the container), the server logs a warning and falls back to the CPU.
-
-On the GPU a full transcription takes a fraction of a second, so the defaults differ from the CPU image:
-partials every second for the whole utterance, and the final result is always a fresh full decode
-(`STREAM_FINAL_REUSE_PARTIAL=false`). The KV cache stays on the GPU between decode steps.
-
-Build locally instead of pulling: `docker compose -f compose.gpu.yaml -f compose.gpu.local.yaml up -d --build`.
-
-| Variable | Default | Description |
-|---|---|---|
-| `ASR_MODEL_DIR` | `qwen3-asr-1.7b-onnx` | Model folder inside `MODEL_DIR` |
-| `ONNX_PROVIDER` | `cuda` (image default) | `cuda` or `cpu` |
-| `ONNX_DEVICE_ID` | `0` | GPU index |
-| `ONNX_DECODER` / `ONNX_ENCODER` | auto | Decoder / encoder file in the model folder; auto prefers `decoder-*fp16*` on the GPU and `decoder-*fp32*` on the CPU, and `encoder.int4.onnx` over `encoder.onnx` |
-| `STREAM_PARTIAL_INTERVAL_SEC` / `STREAM_PARTIAL_MAX_SEC` | `1.0` / `60` | Partial cadence and cutoff |
-| `STREAM_FINAL_REUSE_PARTIAL` | `false` | See [CPU deployment](#cpu-deployment) |
-| `STREAM_MAX_SEC` | `120` | Audio beyond this per utterance is dropped |
-
 ## Authentication
 
 Set `API_TOKEN` to require a shared secret on every endpoint except `GET /ready` (used by the container
 healthcheck). Clients send `Authorization: Bearer <token>`, or `?token=<token>` where headers can't be set
 (e.g. browser WebSockets). Missing or wrong tokens get HTTP 401, or a rejected WebSocket handshake (HTTP 403).
-The CPU compose file requires it; for the GPU compose file it's optional (`API_TOKEN` in `.env`).
-
-## Releasing
-
-Pushing a version tag builds the image with GitHub Actions (`.github/workflows/docker-publish.yml`)
-and pushes it to GHCR:
-
-```bash
-git tag v1.2.3
-git push origin v1.2.3
-```
-
-| Tag pushed | Image tags |
-|---|---|
-| `v1.2.3` | ONNX CPU: `1.2.3-cpu`, `1.2-cpu`, `1-cpu`, `latest-cpu` · ONNX GPU: `1.2.3-gpu`, `1.2-gpu`, `1-gpu`, `latest-gpu` |
-| `v1.2.3-rc.1` | `1.2.3-rc.1-cpu`, `1.2.3-rc.1-gpu` (don't move `latest-*`) |
-
-The workflow can also be started manually (Actions → Publish Docker image → Run workflow); a manual run on a
-branch publishes `latest-cpu` / `latest-gpu` only. The vLLM image is not published; build it with `compose.yaml`. The CPU image is built for linux/amd64 and linux/arm64.
-
-GHCR packages are private when first published. To pull without `docker login ghcr.io`, open the package
-(GitHub profile → Packages → fast-qwen-asr-inference-vllm → Package settings) and change its visibility to public.
-
-## Configuration
-
-Set in `.env` (see `.env.example`):
-
-| Variable | Default | Description |
-|---|---|---|
-| `MODEL_DIR` | — (required) | Host directory with model folders, mounted read-only at `/models` |
-| `ASR_MODEL_DIR` | `Qwen3-ASR-1.7B-fp8` | ASR model folder name inside `MODEL_DIR` |
-| `VLLM_QUANTIZATION` | `modelopt` | vLLM quantization method passed to the model loader; empty for unquantized (BF16) checkpoints |
-| `ENABLE_ALIGNER_MODEL` | `false` | Load the forced aligner (timestamps for `POST /transcribe`) |
-| `ALIGNER_MODEL_DIR` | `Qwen3-ForcedAligner-0.6B` | Aligner folder name inside `MODEL_DIR` |
-| `PORT` | `8907` | Host port |
-| `BIND_ADDR` | `127.0.0.1` | Host interface to bind; `0.0.0.0` exposes the server to the network |
-| `GPU_MEMORY_UTILIZATION` | `0.15` | Fraction of GPU memory vLLM may reserve |
-| `STREAM_CHUNK_SIZE_SEC` | `1.0` | Audio seconds per streaming decode step. Smaller = faster partial updates, more GPU work |
-| `STREAM_UNFIXED_CHUNK_NUM` | `2` | First N chunks are decoded without a text prefix |
-| `STREAM_UNFIXED_TOKEN_NUM` | `5` | Trailing tokens rolled back (re-decodable) on each step |
-| `PARTIAL_INTERVAL_MS` | `120` | Minimum interval between `partial` messages |
-| `CUDA_FLAVOR` | `runtime` | Local build only: CUDA base image, `runtime` or `devel` (CUDA toolkit) |
-| `BUNDLE_FLASH_ATTENTION` | `false` | Local build only: install flash-attn (speeds up the forced aligner; needs `CUDA_FLAVOR=devel`) |
-| `MAX_JOBS` | `8` | Local build only: parallel jobs if flash-attn has to be compiled from source |
-
-Further server settings (`MAX_CONCURRENT_INFER`, `MAX_CONCURRENT_DECODE`, `THREADPOOL_WORKERS`,
-`MAX_NEW_TOKENS`, `OPENCC_TW_CONFIG`, `OPENCC_HK_CONFIG`) are read from the environment by `server.py`
-and can be added to `compose.yaml`.
+The CPU compose file requires it; for the GPU and vLLM compose files it's optional (`API_TOKEN` in `.env`).
 
 ## Languages
 
@@ -424,7 +292,7 @@ Expected: `[{"text":"Das ist ein Referenztext.","language":"German"}, ...]`
 
 ### Forced alignment
 
-Requires `ENABLE_ALIGNER_MODEL=true` in `.env` (then `docker compose up -d`).
+Only in the [vLLM image](#vllm-image-advanced), with `ENABLE_ALIGNER_MODEL=true` in `.env` (then `docker compose up -d`).
 
 ```bash
 curl -X POST "http://127.0.0.1:8907/transcribe?language=de&forced_alignment=true" -F "files=@files/reference.wav"
@@ -474,3 +342,145 @@ Reference numbers from upstream (1x NVIDIA H200 NVL, `Qwen3-ASR-1.7B` + `Qwen3-F
 
 Upstream streaming numbers were measured before the streaming buffer fix
 (audio was re-fed cumulatively), so re-run the streaming benchmark on your hardware.
+
+## vLLM image (advanced)
+
+The original backend: [qwen-asr](https://github.com/QwenLM/Qwen3-ASR) on vLLM, with Qwen3-ASR-1.7B in FP8.
+It supports continuous batching for many concurrent streams and the forced aligner (timestamps), at the cost of a
+~14 GB image that `compose.yaml` builds locally. Requirements are the same as for the
+[GPU quick start](#quick-start-gpu-onnx-runtime), plus an SM80+ GPU (RTX 30 series or newer).
+
+### 1. Download the models
+
+Put each model in its own folder inside one models directory, e.g.:
+
+```
+D:/models/                      (or /srv/models on Linux)
+├── Qwen3-ASR-1.7B-fp8/         default ASR model (FP8)
+├── Qwen3-ASR-1.7B/             optional, original BF16 model
+└── Qwen3-ForcedAligner-0.6B/   optional, only for timestamps
+```
+
+For example with the HuggingFace CLI:
+
+```bash
+uvx --from huggingface_hub hf download vrfai/Qwen3-ASR-1.7B-fp8 --local-dir D:/models/Qwen3-ASR-1.7B-fp8
+# optional
+uvx --from huggingface_hub hf download Qwen/Qwen3-ASR-1.7B --local-dir D:/models/Qwen3-ASR-1.7B
+uvx --from huggingface_hub hf download Qwen/Qwen3-ForcedAligner-0.6B --local-dir D:/models/Qwen3-ForcedAligner-0.6B
+```
+
+#### Which model
+
+The server uses the `qwen-asr` package, which needs checkpoints in the **original Qwen3-ASR layout**
+(`config.json` with `thinker_config`, weights named `thinker.*`). The Transformers-native conversions
+(`Qwen/Qwen3-ASR-1.7B-hf`) and GGUF / MLX / ONNX / OpenVINO builds do **not** work.
+
+| Model | Size | Notes |
+|---|---|---|
+| [`vrfai/Qwen3-ASR-1.7B-fp8`](https://huggingface.co/vrfai/Qwen3-ASR-1.7B-fp8) (default) | ~2.5 GB weights | NVIDIA ModelOpt FP8, text decoder only (audio encoder and lm_head stay BF16). Reported WER 7.34% → 7.60% vs BF16 and ~25% higher single-request throughput (RTX 5090). Needs `VLLM_QUANTIZATION=modelopt` and an SM80+ GPU (RTX 30 series or newer); native FP8 compute on RTX 40/50 (SM89+), weight-only FP8 via Marlin on RTX 30 |
+| [`Qwen/Qwen3-ASR-1.7B`](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) | ~3.9 GB weights | Original BF16. Set `ASR_MODEL_DIR=Qwen3-ASR-1.7B` and an empty `VLLM_QUANTIZATION=` |
+
+### 2. Configure
+
+```bash
+cp .env.example .env
+```
+
+Set at least `MODEL_DIR` in `.env` (use forward slashes on Windows, e.g. `D:/models`).
+Folder names inside it are set with `ASR_MODEL_DIR` / `ALIGNER_MODEL_DIR`.
+
+> **Windows tip:** loading models from a Windows drive goes through the WSL 2 file share and is slow.
+> For faster startup, keep the models inside the WSL filesystem (e.g. `\\wsl$\Ubuntu\home\<you>\models`,
+> referenced in `.env` as the Linux path when running `docker compose` from WSL).
+
+### 3. Build and start
+
+```bash
+docker compose up -d --build   # builds the image on first run
+docker compose logs -f
+```
+
+Wait for `Server is ready to accept requests.` — `docker compose ps` shows the container as `healthy` once
+models are loaded and warmed up.
+
+**!!FIRST START NOTICE!!** The image is large (CUDA + vLLM + PyTorch), and the first start (CUDA graph compile,
+loading the model into VRAM and warmup) can take a while. The vLLM compile cache is kept in the `vllm_cache` volume,
+so subsequent starts are faster.
+
+The server is available at `http://127.0.0.1:8907` (bound to localhost only; set `API_TOKEN` before exposing it).
+
+### Common commands
+
+```bash
+docker compose ps                 # status / health
+docker compose logs -f            # follow logs
+docker compose restart            # restart (e.g. after changing .env: use `up -d` instead)
+docker compose up -d              # apply .env changes
+git pull && docker compose up -d --build      # update: rebuild from the latest code
+docker compose build --no-cache               # full rebuild (also picks up new dependency versions)
+docker compose down               # stop and remove the container
+```
+
+### Image build options
+
+The image is based on `nvidia/cuda:12.8.0-runtime` (torch and vLLM bring their own CUDA kernels and libraries).
+flash-attn is not installed by default: vLLM has its own attention kernels, and flash-attn only speeds up the forced
+aligner. To include it, set `CUDA_FLAVOR=devel` (adds the CUDA toolkit, needed to compile it) and
+`BUNDLE_FLASH_ATTENTION=true` in `.env`; compiling it takes a long time and a lot of RAM (`MAX_JOBS` limits the
+parallel jobs).
+
+### Development mode
+
+Run `server.py` from the working tree with auto-reload (no rebuild needed after edits):
+
+```bash
+docker compose -f compose.yaml -f compose.dev.yaml up
+```
+
+### Configuration
+
+Set in `.env` (see `.env.example`):
+
+| Variable | Default | Description |
+|---|---|---|
+| `MODEL_DIR` | — (required) | Host directory with model folders, mounted read-only at `/models` |
+| `ASR_MODEL_DIR` | `Qwen3-ASR-1.7B-fp8` | ASR model folder name inside `MODEL_DIR` |
+| `VLLM_QUANTIZATION` | `modelopt` | vLLM quantization method passed to the model loader; empty for unquantized (BF16) checkpoints |
+| `ENABLE_ALIGNER_MODEL` | `false` | Load the forced aligner (timestamps for `POST /transcribe`) |
+| `ALIGNER_MODEL_DIR` | `Qwen3-ForcedAligner-0.6B` | Aligner folder name inside `MODEL_DIR` |
+| `PORT` | `8907` | Host port |
+| `BIND_ADDR` | `127.0.0.1` | Host interface to bind; `0.0.0.0` exposes the server to the network |
+| `GPU_MEMORY_UTILIZATION` | `0.15` | Fraction of GPU memory vLLM may reserve |
+| `STREAM_CHUNK_SIZE_SEC` | `1.0` | Audio seconds per streaming decode step. Smaller = faster partial updates, more GPU work |
+| `STREAM_UNFIXED_CHUNK_NUM` | `2` | First N chunks are decoded without a text prefix |
+| `STREAM_UNFIXED_TOKEN_NUM` | `5` | Trailing tokens rolled back (re-decodable) on each step |
+| `PARTIAL_INTERVAL_MS` | `120` | Minimum interval between `partial` messages |
+| `CUDA_FLAVOR` | `runtime` | Local build only: CUDA base image, `runtime` or `devel` (CUDA toolkit) |
+| `BUNDLE_FLASH_ATTENTION` | `false` | Local build only: install flash-attn (speeds up the forced aligner; needs `CUDA_FLAVOR=devel`) |
+| `MAX_JOBS` | `8` | Local build only: parallel jobs if flash-attn has to be compiled from source |
+
+Further server settings (`MAX_CONCURRENT_INFER`, `MAX_CONCURRENT_DECODE`, `THREADPOOL_WORKERS`,
+`MAX_NEW_TOKENS`, `OPENCC_TW_CONFIG`, `OPENCC_HK_CONFIG`) are read from the environment by `server.py`
+and can be added to `compose.yaml`.
+
+## Releasing
+
+Pushing a version tag builds the image with GitHub Actions (`.github/workflows/docker-publish.yml`)
+and pushes it to GHCR:
+
+```bash
+git tag v1.2.3
+git push origin v1.2.3
+```
+
+| Tag pushed | Image tags |
+|---|---|
+| `v1.2.3` | ONNX CPU: `1.2.3-cpu`, `1.2-cpu`, `1-cpu`, `latest-cpu` · ONNX GPU: `1.2.3-gpu`, `1.2-gpu`, `1-gpu`, `latest-gpu` |
+| `v1.2.3-rc.1` | `1.2.3-rc.1-cpu`, `1.2.3-rc.1-gpu` (don't move `latest-*`) |
+
+The workflow can also be started manually (Actions → Publish Docker image → Run workflow); a manual run on a
+branch publishes `latest-cpu` / `latest-gpu` only. The vLLM image is not published; build it with `compose.yaml`. The CPU image is built for linux/amd64 and linux/arm64.
+
+GHCR packages are private when first published. To pull without `docker login ghcr.io`, open the package
+(GitHub profile → Packages → fast-qwen-asr-inference-vllm → Package settings) and change its visibility to public.
