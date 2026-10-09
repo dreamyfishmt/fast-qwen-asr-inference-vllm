@@ -17,6 +17,14 @@ The vLLM image is mostly PyTorch, vLLM and the full CUDA library set built for e
 continuous batching for many concurrent users. It is not published (too large to build in CI), so `compose.yaml`
 builds it locally.
 
+## Client: QwenType
+
+[**QwenType**](https://github.com/dreamyfishmt/QwenType) is the Windows voice-typing client for this server:
+hold Right Ctrl, speak, release, and the text is typed into the focused app, with a live transcript while you
+speak. Download `QwenType.exe` from its [Releases](https://github.com/dreamyfishmt/QwenType/releases), start the
+server below, then point the client at it in the tray menu → **ASR Server…**
+(default `ws://127.0.0.1:8907/transcribe-streaming`).
+
 ## Quick start: GPU (ONNX Runtime)
 
 Qwen3-ASR-1.7B (int4) on an NVIDIA GPU with ONNX Runtime's CUDA execution provider. The image (`…:latest-gpu`,
