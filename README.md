@@ -49,6 +49,16 @@ git clone https://github.com/dreamyfishmt/fast-qwen-asr-inference-vllm
 cd fast-qwen-asr-inference-vllm
 ```
 
+Or, to only run the server, download just the compose file and the settings template into an empty folder
+(`Caddyfile` is only needed with `--profile tls`):
+
+```bash
+curl -LO https://raw.githubusercontent.com/dreamyfishmt/fast-qwen-asr-inference-vllm/main/compose.gpu.yaml
+curl -L -o .env https://raw.githubusercontent.com/dreamyfishmt/fast-qwen-asr-inference-vllm/main/.env.gpu.example
+```
+
+On Windows PowerShell, use `curl.exe` instead of `curl`. This already creates `.env`, so skip the `cp` in step 2.
+
 1. Download the model (~2.7 GB) from [`dreamyfishmt/qwen3-asr-1.7b-onnx`](https://huggingface.co/dreamyfishmt/qwen3-asr-1.7b-onnx),
    pinned to the tested revision:
 
