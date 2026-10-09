@@ -19,35 +19,22 @@ env:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
-          # GPU: vLLM + CUDA (Dockerfile)
-          - variant: gpu
-            dockerfile: Dockerfile
-            suffix: ""
-            platforms: linux/amd64
           # CPU: ONNX Runtime (Dockerfile.cpu), tags get a -cpu suffix
           - variant: cpu
             dockerfile: Dockerfile.cpu
             suffix: "-cpu"
             platforms: linux/amd64,linux/arm64
+          # GPU: ONNX Runtime + CUDA 13 (Dockerfile.gpu), tags get a -gpu suffix
+          - variant: gpu
+            dockerfile: Dockerfile.gpu
+            suffix: "-gpu"
+            platforms: linux/amd64
     steps:
-      # The CUDA + vLLM + torch image needs far more than the ~14 GB
-      # a hosted runner has free by default.
-      - name: Free disk space
-        if: matrix.variant == 'gpu'
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/local/share/powershell \
-            /usr/share/swift /usr/local/julia* /opt/az /opt/microsoft
-          sudo docker image prune --all --force
-          sudo apt-get clean
-          df -h /
-
       - uses: actions/checkout@v4
 
       - name: Lowercase image name
@@ -86,8 +73,4 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # flash-attn is only used by the forced aligner (vLLM ships its own attention kernels).
-          # Building it from source got the hosted runner shut down (v0.2.0), so it is left out.
-          build-args: |
-            BUNDLE_FLASH_ATTENTION=false
           provenance: false
