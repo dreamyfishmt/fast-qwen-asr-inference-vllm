@@ -2,44 +2,30 @@
 # Built and started via compose.yaml; see README.md.
 
 ARG CUDA_VERSION=12.8.0
-ARG from=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
+# "runtime" keeps the image small: torch and vLLM ship their own CUDA kernels and libraries.
+# "devel" adds the CUDA toolkit (nvcc), which is only needed to compile flash-attn (BUNDLE_FLASH_ATTENTION=true).
+ARG CUDA_FLAVOR=runtime
+ARG from=nvidia/cuda:${CUDA_VERSION}-${CUDA_FLAVOR}-ubuntu22.04
 FROM ${from} AS base
 
 ARG DEBIAN_FRONTEND=noninteractive
+# gcc + python3-dev: Triton (used by vLLM's torch.compile) builds a small C launcher at runtime
 RUN <<EOF
 apt update -y && apt upgrade -y && apt install -y --no-install-recommends  \
-    git \
     python3 \
     python3-pip \
     python3-dev \
-    wget \
+    gcc \
+    libc6-dev \
     libsndfile1 \
-    ccache \
-    software-properties-common \
     ffmpeg \
     ca-certificates \
 && rm -rf /var/lib/apt/lists/*
 EOF
 
-RUN wget https://github.com/Kitware/CMake/releases/download/v3.26.1/cmake-3.26.1-Linux-x86_64.sh \
-    -q -O /tmp/cmake-install.sh \
-    && chmod u+x /tmp/cmake-install.sh \
-    && mkdir /opt/cmake-3.26.1 \
-    && /tmp/cmake-install.sh --skip-license --prefix=/opt/cmake-3.26.1 \
-    && rm /tmp/cmake-install.sh \
-    && ln -s /opt/cmake-3.26.1/bin/* /usr/local/bin
-
 RUN ln -s /usr/bin/python3 /usr/bin/python
 
 WORKDIR /app
-
-# Parallelism for compiling flash-attn from source (only used when no prebuilt wheel matches)
-ARG MAX_JOBS=8
-ENV MAX_JOBS=${MAX_JOBS}
-ENV NVCC_THREADS=2
-ENV CCACHE_DIR=/root/.cache/ccache
-
-ARG BUNDLE_FLASH_ATTENTION=true
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip3 install -U pip setuptools wheel
@@ -50,18 +36,27 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip3 install -U "qwen-asr[vllm]" fastapi uvicorn python-multipart requests soundfile scipy websockets psutil \
         opencc-python-reimplemented
 
-# flash-attn's setup tries to download a prebuilt wheel matching torch/CUDA first,
-# and only falls back to a (slow) source build.
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    --mount=type=cache,target=/root/.cache/pip \
+# flash-attn only speeds up the forced aligner (Transformers backend); vLLM brings its own attention
+# kernels. Off by default: without a matching prebuilt wheel it compiles from source, which needs
+# CUDA_FLAVOR=devel and takes a long time (MAX_JOBS limits parallel compile jobs).
+ARG BUNDLE_FLASH_ATTENTION=false
+ARG MAX_JOBS=8
+RUN --mount=type=cache,target=/root/.cache/pip \
     if [ "$BUNDLE_FLASH_ATTENTION" = "true" ]; then \
-        pip3 install -U flash-attn --no-build-isolation; \
+        if ! command -v nvcc >/dev/null 2>&1 && [ ! -x /usr/local/cuda/bin/nvcc ]; then \
+            echo "BUNDLE_FLASH_ATTENTION=true needs the CUDA toolkit: build with CUDA_FLAVOR=devel" >&2; exit 1; \
+        fi; \
+        apt update -y && apt install -y --no-install-recommends g++ ninja-build && rm -rf /var/lib/apt/lists/* \
+        && MAX_JOBS=${MAX_JOBS} NVCC_THREADS=2 pip3 install -U flash-attn --no-build-isolation; \
     fi
 
 COPY server.py /app/server.py
 COPY engines /app/engines
 
-ENV ASR_BACKEND=vllm
+# FlashInfer's sampling kernels may be JIT-compiled with nvcc, which the runtime image lacks.
+# ASR decodes greedily, so vLLM's own sampler is all that's needed.
+ENV ASR_BACKEND=vllm \
+    VLLM_USE_FLASHINFER_SAMPLER=0
 
 EXPOSE 8000
 

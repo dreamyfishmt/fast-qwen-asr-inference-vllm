@@ -35,7 +35,7 @@ jobs:
             suffix: "-cpu"
             platforms: linux/amd64,linux/arm64
     steps:
-      # The CUDA devel base + vLLM + torch image needs far more than the ~14 GB
+      # The CUDA + vLLM + torch image needs far more than the ~14 GB
       # a hosted runner has free by default.
       - name: Free disk space
         if: matrix.variant == 'gpu'
@@ -86,7 +86,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # flash-attn is only used by the forced aligner (vLLM ships its own attention kernels).
+          # Building it from source got the hosted runner shut down (v0.2.0), so it is left out.
           build-args: |
-            BUNDLE_FLASH_ATTENTION=true
-            MAX_JOBS=2
+            BUNDLE_FLASH_ATTENTION=false
           provenance: false
