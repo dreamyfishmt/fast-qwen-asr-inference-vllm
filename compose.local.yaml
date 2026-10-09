@@ -5,6 +5,7 @@ services:
     build:
       context: .
       args:
+        CUDA_FLAVOR: ${CUDA_FLAVOR:-runtime}
         BUNDLE_FLASH_ATTENTION: ${BUNDLE_FLASH_ATTENTION:-false}
         MAX_JOBS: ${MAX_JOBS:-8}
     image: qwen3-asr-server:local

@@ -35,7 +35,7 @@ jobs:
             suffix: "-cpu"
             platforms: linux/amd64,linux/arm64
     steps:
-      # The CUDA devel base + vLLM + torch image needs far more than the ~14 GB
+      # The CUDA + vLLM + torch image needs far more than the ~14 GB
       # a hosted runner has free by default.
       - name: Free disk space
         if: matrix.variant == 'gpu'
