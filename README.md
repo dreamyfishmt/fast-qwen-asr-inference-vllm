@@ -22,8 +22,12 @@ builds it locally.
 [**QwenType**](https://github.com/dreamyfishmt/QwenType) is the Windows voice-typing client for this server:
 hold Right Ctrl, speak, release, and the text is typed into the focused app, with a live transcript while you
 speak. Download `QwenType.exe` from its [Releases](https://github.com/dreamyfishmt/QwenType/releases), start the
-server below, then point the client at it in the tray menu → **ASR Server…**
-(default `ws://127.0.0.1:8907/transcribe-streaming`).
+server below, then set the connection in the tray menu → **ASR Server…**:
+
+- **WebSocket URL**: default `ws://127.0.0.1:8907/transcribe-streaming` (server on the same PC); for a remote
+  server behind HTTPS, `wss://DOMAIN/transcribe-streaming`
+- **API Token**: the server's `API_TOKEN` (required by the CPU image; leave empty if the server has none)
+- **Hotwords** (optional): names and terms sent as the stream's [`context`](#ws-transcribe-streaming)
 
 ## Quick start: GPU (ONNX Runtime)
 
@@ -36,14 +40,21 @@ Qwen3-ASR-1.7B (int4) on an NVIDIA GPU with ONNX Runtime's CUDA execution provid
 - Docker with Compose v2 and GPU support:
   - Linux: [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
   - Windows: Docker Desktop with the WSL 2 backend (GPU support is built in)
-- [uv](https://docs.astral.sh/uv/) or the `hf` CLI, to download the model
+- [uv](https://docs.astral.sh/uv/) (or the `hf` CLI), to download the model
+
+Get this repository first (the compose files, the download script and the test samples live here):
+
+```bash
+git clone https://github.com/dreamyfishmt/fast-qwen-asr-inference-vllm
+cd fast-qwen-asr-inference-vllm
+```
 
 1. Download the model (~2.7 GB) from [`dreamyfishmt/qwen3-asr-1.7b-onnx`](https://huggingface.co/dreamyfishmt/qwen3-asr-1.7b-onnx),
    pinned to the tested revision:
 
    ```bash
-   hf download dreamyfishmt/qwen3-asr-1.7b-onnx --revision f4a19c9705b87ea06685b1ffddd95772ffbde1b0 \
-     --local-dir /srv/models/qwen3-asr-1.7b-onnx
+   uvx --from huggingface_hub hf download dreamyfishmt/qwen3-asr-1.7b-onnx \
+     --revision f4a19c9705b87ea06685b1ffddd95772ffbde1b0 --local-dir /srv/models/qwen3-asr-1.7b-onnx
    # or: scripts/download-models.sh 1.7b /srv/models   # -> /srv/models/qwen3-asr-1.7b-onnx
    ```
 
@@ -58,10 +69,12 @@ Qwen3-ASR-1.7B (int4) on an NVIDIA GPU with ONNX Runtime's CUDA execution provid
    GroupQueryAttention decoder with fp16 I/O from [`sorryhyun/qwen3-asr-onnx-gqa`](https://huggingface.co/sorryhyun/qwen3-asr-onnx-gqa);
    see its [model card](https://huggingface.co/dreamyfishmt/qwen3-asr-1.7b-onnx) for the exact source revisions.
 
+   If the download fails with a 401 from `cas-server.xethub.hf.co` (some proxies block Hugging Face's Xet storage),
+   set `HF_HUB_DISABLE_XET=1` and run it again (the script does this automatically).
+
    The 0.6B model folder from [CPU deployment](#cpu-deployment) works on the GPU too (set `ASR_MODEL_DIR`).
 
-2. Get `compose.gpu.yaml` (and `Caddyfile` for HTTPS) and `.env.gpu.example` from this repo, then
-   `cp .env.gpu.example .env` and set `MODEL_DIR` (use forward slashes on Windows, e.g. `D:/models`).
+2. `cp .env.gpu.example .env` and set `MODEL_DIR` (use forward slashes on Windows, e.g. `D:/models`).
 
    > **Windows tip:** loading models from a Windows drive goes through the WSL 2 file share and is slow.
    > For faster startup, keep the models inside the WSL filesystem (e.g. `\\wsl$\Ubuntu\home\<you>\models`),
@@ -107,6 +120,9 @@ The model folder combines two Hugging Face repos: the audio encoder, embeddings 
 text decoder from [`sorryhyun/qwen3-asr-onnx-gqa`](https://huggingface.co/sorryhyun/qwen3-asr-onnx-gqa)
 (built with GroupQueryAttention, so the cost per generated token stays almost flat as the utterance grows).
 
+On the server, get this repository first (`git clone https://github.com/dreamyfishmt/fast-qwen-asr-inference-vllm`
+and `cd` into it); it has the compose files and the download script.
+
 1. Download the model with [`scripts/download-models.sh`](scripts/download-models.sh) (needs the `hf` CLI or
    [uv](https://docs.astral.sh/uv/)). It fetches exactly the files the server uses from the two repos, pinned to the
    tested revisions, into `/srv/models/qwen3-asr-0.6b-onnx`:
@@ -135,7 +151,7 @@ text decoder from [`sorryhyun/qwen3-asr-onnx-gqa`](https://huggingface.co/sorryh
    (The rhasspy repo's own `decoder_merged.int4.onnx` also works if present and no `decoder-*.onnx` is, but it is
    ~2× slower and more prone to repetition loops; `ONNX_DECODER` picks a decoder file explicitly.)
 
-2. Get `compose.cpu.yaml`, `Caddyfile` and `.env.cpu.example` from this repo, then:
+2. In the repository clone:
 
    ```bash
    cp .env.cpu.example .env
@@ -224,18 +240,21 @@ by converting the transcript with OpenCC:
 ## Endpoints
 
 ### `GET /health`
-Model loading status (`starting` → `loading_models` → `warming_up` → `ready`, or `error`), limits,
-streaming settings and memory usage. Always returns 200.
+Model loading status (`starting` → `loading_models` → `warming_up` → `ready`, or `error`), backend, limits,
+streaming settings and memory usage. Returns 200 regardless of the loading status; with `API_TOKEN` set it needs the
+token (401 otherwise), so it also works as a token check.
 
 ### `GET /ready`
-200 `{"status":"ready"}` once models are loaded and warmed up, 503 otherwise. Used by the container healthcheck.
+200 `{"status":"ready"}` once models are loaded and warmed up, 503 otherwise. Never needs a token; used by the
+container healthcheck.
 
 ### `POST /transcribe`
-Upload one or more audio files (any format ffmpeg can decode).
+Upload one or more audio files. The ONNX Runtime images read WAV, FLAC, OGG and MP3 (libsndfile; no ffmpeg);
+the vLLM image also accepts anything ffmpeg can decode (M4A, …).
 
 - **URL**: `http://127.0.0.1:8907/transcribe?language=zh-CN`
 - **Body**: multipart/form-data, one or more `files` fields
-- **Query**: `language` (optional), `context` (optional, see below), `forced_alignment=true|false` (GPU image with `ENABLE_ALIGNER_MODEL=true`)
+- **Query**: `language` (optional), `context` (optional, see below), `forced_alignment=true|false` (vLLM image with `ENABLE_ALIGNER_MODEL=true` only)
 - **Response**: `[{"text": "...", "language": "Chinese"}, ...]` (plus `timestamps` with forced alignment)
 
 ### `WS /transcribe-streaming`
@@ -292,8 +311,10 @@ curl -X POST "http://127.0.0.1:8907/transcribe?language=de" -F "files=@files/ref
 
 # batch: multiple files in one request
 curl -X POST "http://127.0.0.1:8907/transcribe?language=de" \
-  -F "files=@files/reference.m4a" -F "files=@files/reference.mp3" -F "files=@files/reference.wav"
+  -F "files=@files/reference.mp3" -F "files=@files/reference.wav"
 ```
+
+`files/reference.m4a` only works with the vLLM image (it needs ffmpeg).
 
 Expected: `[{"text":"Das ist ein Referenztext.","language":"German"}, ...]`
 
@@ -341,7 +362,8 @@ uv run benchmark.py --mode streaming --url ws://127.0.0.1:8907/transcribe-stream
 uv run benchmark.py --mode batch --url http://127.0.0.1:8907/transcribe --file files/reference.wav --clients 4 --requests 20
 ```
 
-Reference numbers from upstream (1x NVIDIA H200 NVL, `Qwen3-ASR-1.7B` + `Qwen3-ForcedAligner-0.6B`):
+Reference numbers from the upstream **vLLM** backend (1x NVIDIA H200 NVL, `Qwen3-ASR-1.7B` + `Qwen3-ForcedAligner-0.6B`);
+they don't describe the ONNX Runtime images (for the CPU image see [How streaming works on CPU](#how-streaming-works-on-cpu)):
 
 - VRAM: < 2 GB at peak, even with 80 concurrent streams.
 - Batch: 80 requests, avg QPS 28.5, latency P50 0.139 s.
@@ -381,7 +403,8 @@ uvx --from huggingface_hub hf download Qwen/Qwen3-ForcedAligner-0.6B --local-dir
 
 The server uses the `qwen-asr` package, which needs checkpoints in the **original Qwen3-ASR layout**
 (`config.json` with `thinker_config`, weights named `thinker.*`). The Transformers-native conversions
-(`Qwen/Qwen3-ASR-1.7B-hf`) and GGUF / MLX / ONNX / OpenVINO builds do **not** work.
+(`Qwen/Qwen3-ASR-1.7B-hf`) and GGUF / MLX / ONNX / OpenVINO builds do **not** work with the vLLM image (the ONNX
+Runtime images use the ONNX models described in their own sections).
 
 | Model | Size | Notes |
 |---|---|---|
