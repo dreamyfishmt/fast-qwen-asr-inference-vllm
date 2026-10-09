@@ -1,283 +1,241 @@
 # Fast Qwen3-ASR Inference Server (vLLM Backend, FastAPI async processing)
 
-A containerized Qwen3-ASR inferenceserver using FastAPI and vLLM.
+A containerized Qwen3-ASR inference server using FastAPI and vLLM.
 Provides HTTP `/transcribe` and WebSocket `/transcribe-streaming` endpoints.
+
+The server runs with Docker Compose and loads the models from a **local model directory**
+mounted into the container (read-only, offline — the HuggingFace Hub is never contacted).
+
+## Requirements
+
+- NVIDIA GPU + driver
+- Docker with Compose v2 and GPU support:
+  - Linux: [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
+  - Windows: Docker Desktop with the WSL 2 backend (GPU support is built in)
+- [uv](https://docs.astral.sh/uv/) — only for the local test/benchmark clients
 
 ## Setup
 
-1. **Build the image**:
+### 1. Download the models
 
-```bash
-make build
+Put each model in its own folder inside one models directory, e.g.:
+
+```
+D:/models/                      (or /srv/models on Linux)
+├── Qwen3-ASR-1.7B/
+└── Qwen3-ForcedAligner-0.6B/   (optional, only for timestamps)
 ```
 
-2. **Start the server**:
+For example with the HuggingFace CLI (or `modelscope download` from ModelScope):
+
 ```bash
-make up
+uvx --from huggingface_hub hf download Qwen/Qwen3-ASR-1.7B --local-dir D:/models/Qwen3-ASR-1.7B
+# optional
+uvx --from huggingface_hub hf download Qwen/Qwen3-ForcedAligner-0.6B --local-dir D:/models/Qwen3-ForcedAligner-0.6B
 ```
 
-Server will be available at `http://localhost:8907` by default.
+### 2. Configure
 
-**!!FIRST START NOTICE!!** Downloading, CUDA graph compile, loading the model into VRAM and warmup can take a few minutes depending on your internet speed and GPU.
+```bash
+cp .env.example .env
+```
 
-3. **Check logs**:
-   ```bash
-   make logs
-   ```
-   Wait for "Application startup complete".
+Set at least `MODEL_DIR` in `.env` (use forward slashes on Windows, e.g. `D:/models`).
+Folder names inside it are set with `ASR_MODEL_DIR` / `ALIGNER_MODEL_DIR`.
+
+> **Windows tip:** loading models from a Windows drive goes through the WSL 2 file share and is slow.
+> For faster startup, keep the models inside the WSL filesystem (e.g. `\\wsl$\Ubuntu\home\<you>\models`,
+> referenced in `.env` as the Linux path when running `docker compose` from WSL).
+
+### 3. Build and start
+
+```bash
+docker compose up -d --build
+docker compose logs -f
+```
+
+Wait for `Server is ready to accept requests.` — `docker compose ps` shows the container as `healthy` once
+models are loaded and warmed up.
+
+**!!FIRST START NOTICE!!** Building the image (flash-attn) and the first start (CUDA graph compile, loading
+the model into VRAM and warmup) can take a while. The vLLM compile cache is kept in the `vllm_cache` volume,
+so subsequent starts are faster.
+
+The server is available at `http://127.0.0.1:8907` (bound to localhost only, as it has no authentication).
+
+### Common commands
+
+```bash
+docker compose ps                 # status / health
+docker compose logs -f            # follow logs
+docker compose restart            # restart (e.g. after changing .env: use `up -d` instead)
+docker compose up -d              # apply .env changes
+docker compose down               # stop and remove the container
+docker compose build --no-cache   # rebuild the image
+```
+
+### Development mode
+
+Run `server.py` from the working tree with auto-reload (no rebuild needed after edits):
+
+```bash
+docker compose -f compose.yaml -f compose.dev.yaml up
+```
 
 ## Configuration
 
-Environment variables can be set in `Makefile` or passed to `make up`:
+Set in `.env` (see `.env.example`):
 
-- `ENABLE_ASR_MODEL` (default: true)
-- `ENABLE_ALIGNER_MODEL` (default: true)
-- `ASR_MODEL_NAME` (default: Qwen/Qwen3-ASR-1.7B)
-- `ALIGNER_MODEL_NAME` (default: Qwen/Qwen3-ForcedAligner-0.6B)
+| Variable | Default | Description |
+|---|---|---|
+| `MODEL_DIR` | — (required) | Host directory with model folders, mounted read-only at `/models` |
+| `ASR_MODEL_DIR` | `Qwen3-ASR-1.7B` | ASR model folder name inside `MODEL_DIR` |
+| `ENABLE_ALIGNER_MODEL` | `false` | Load the forced aligner (timestamps for `POST /transcribe`) |
+| `ALIGNER_MODEL_DIR` | `Qwen3-ForcedAligner-0.6B` | Aligner folder name inside `MODEL_DIR` |
+| `PORT` | `8907` | Host port |
+| `BIND_ADDR` | `127.0.0.1` | Host interface to bind; `0.0.0.0` exposes the server to the network |
+| `GPU_MEMORY_UTILIZATION` | `0.15` | Fraction of GPU memory vLLM may reserve |
+| `STREAM_CHUNK_SIZE_SEC` | `1.0` | Audio seconds per streaming decode step. Smaller = faster partial updates, more GPU work |
+| `STREAM_UNFIXED_CHUNK_NUM` | `2` | First N chunks are decoded without a text prefix |
+| `STREAM_UNFIXED_TOKEN_NUM` | `5` | Trailing tokens rolled back (re-decodable) on each step |
+| `PARTIAL_INTERVAL_MS` | `120` | Minimum interval between `partial` messages |
+| `BUNDLE_FLASH_ATTENTION` | `true` | Install flash-attn at build time |
+| `MAX_JOBS` | `8` | Parallel jobs if flash-attn has to be compiled from source |
+
+Further server settings (`MAX_CONCURRENT_INFER`, `MAX_CONCURRENT_DECODE`, `THREADPOOL_WORKERS`,
+`MAX_NEW_TOKENS`, `OPENCC_TW_CONFIG`, `OPENCC_HK_CONFIG`) are read from the environment by `server.py`
+and can be added to `compose.yaml`.
+
+## Languages
+
+The `language` parameter is optional (auto-detect when omitted). It accepts ISO 639-1 / BCP-47 codes
+(`en`, `en-US`, `de`, `ja`, `ko`, `zh`, `zh-CN`, `yue`, ...) or Qwen language names (`Chinese`, `English`, ...).
+Unsupported languages are rejected (HTTP 400 / WebSocket `error` message).
+
+Qwen3-ASR has a single `Chinese` language that outputs Simplified Chinese. Traditional variants are produced
+by converting the transcript with OpenCC:
+
+| Code | Output |
+|---|---|
+| `zh`, `zh-CN`, `zh-Hans`, `zh-SG` | Simplified Chinese |
+| `zh-TW`, `zh-Hant` | Traditional Chinese, Taiwan phrasing (`s2twp`) |
+| `zh-HK`, `zh-MO` | Traditional Chinese, Hong Kong (`s2hk`) |
 
 ## Endpoints
 
-### `POST /transcribe`
-Upload an audio file for ASR.
+### `GET /health`
+Model loading status (`starting` → `loading_models` → `warming_up` → `ready`, or `error`), limits,
+streaming settings and memory usage. Always returns 200.
 
-- **URL**: `http://localhost:8907/transcribe`
-- **Method**: POST (Multipart/Form-Data)
-- **Parameters**: 
-  - `file`: Audio file
-  - `language`: Target language (e.g. `de`)
-  - `forced_alignment`: true/false
+### `GET /ready`
+200 `{"status":"ready"}` once models are loaded and warmed up, 503 otherwise. Used by the container healthcheck.
+
+### `POST /transcribe`
+Upload one or more audio files (any format ffmpeg can decode).
+
+- **URL**: `http://127.0.0.1:8907/transcribe?language=zh-CN`
+- **Body**: multipart/form-data, one or more `files` fields
+- **Query**: `language` (optional), `forced_alignment=true|false` (requires `ENABLE_ALIGNER_MODEL=true`)
+- **Response**: `[{"text": "...", "language": "Chinese"}, ...]` (plus `timestamps` with forced alignment)
 
 ### `WS /transcribe-streaming`
-Stream raw PCM audio for real-time transcription.
+Stream raw PCM audio for real-time transcription. One connection = one utterance.
 
-- **URL**: `ws://localhost:8907/transcribe-streaming`
-- **Protocol**: Send JSON `start`, then binary PCM chunks (16k, 16-bit, mono), then JSON `stop`.
+- **URL**: `ws://127.0.0.1:8907/transcribe-streaming?language=zh-CN` (`language` is a **query parameter**, optional)
 
-### `GET /health`
+Protocol:
 
-- **URL**: `http://localhost:8907/health`
-- **Method**: GET
+1. Client connects. If the models are still loading, the server holds the connection until they are ready
+   (clients should apply a timeout while waiting for `ready`).
+2. Server → `{"type": "ready"}`
+3. Client → `{"type": "start", "format": "pcm_s16le", "sample_rate_hz": 16000}`
+   (anything other than 16 kHz `pcm_s16le` is rejected with an `error` and close code 1003)
+4. Server → `{"type": "info", "message": "language=Chinese"}` (only when `language` was given)
+5. Client → binary frames: raw PCM, 16 kHz, 16-bit little-endian, mono (any size, e.g. 100 ms = 3200 bytes)
+6. Server → `{"type": "partial", "text": "...", "language": "Chinese"}` — the **full** transcript so far;
+   earlier words may be revised, so replace (don't append) the displayed text
+7. Client → `{"type": "stop"}`
+8. Server → `{"type": "final", "text": "...", "language": "Chinese"}`, then closes the connection (code 1000)
+
+Errors are sent as `{"type": "error", "message": "..."}` followed by a close
+(1002: audio before `start`, 1003: unsupported format/language, 1011: server not ready / internal error).
 
 ## Testing
 
-### Health Check
-Get the stats and model loading status.
+> **Windows PowerShell:** use `curl.exe` instead of `curl` (in Windows PowerShell 5.1, `curl` is an alias
+> for `Invoke-WebRequest`).
+
+Sample files are in `files/` (`reference.*` — German: "Das ist ein Referenztext.").
+
+### Health / readiness
 
 ```bash
-make health
+curl http://127.0.0.1:8907/health
+curl -i http://127.0.0.1:8907/ready
 ```
 
+### Batch transcription
+
 ```bash
-Checking health...
-{
-  "status": "ready",
-  "limits": {
-    "max_concurrent_decode": 4,
-    "max_concurrent_infer": 1,
-    "threadpool_workers": 320
-  },
-  "memory": {
-    "ram_total_mb": 515491,
-    "ram_available_mb": 489283,
-    "ram_percent": 5.1,
-    "gpu_allocated_mb": 1756,
-    "gpu_reserved_mb": 1766
-  }
-}
+# single file
+curl -X POST "http://127.0.0.1:8907/transcribe?language=de" -F "files=@files/reference.wav"
+
+# batch: multiple files in one request
+curl -X POST "http://127.0.0.1:8907/transcribe?language=de" \
+  -F "files=@files/reference.m4a" -F "files=@files/reference.mp3" -F "files=@files/reference.wav"
 ```
 
-**RESULTS: How much VRAM does Qwen3-ASR require?**:
-`Qwen/Qwen3-ASR-1.7B` and `Qwen/Qwen3-ForcedAligner-0.6B` together take < 2GB VRAM at PEAK - even with 80 concurrent streams in processing.
+Expected: `[{"text":"Das ist ein Referenztext.","language":"German"}, ...]`
 
-### Automated Test
-Runs a verification script using cached sample files (downloads them once to `files/`).
+### Forced alignment
+
+Requires `ENABLE_ALIGNER_MODEL=true` in `.env` (then `docker compose up -d`).
 
 ```bash
-make test
+curl -X POST "http://127.0.0.1:8907/transcribe?language=de&forced_alignment=true" -F "files=@files/reference.wav"
 ```
 
+### Streaming
+
+The test clients are managed with uv (`pyproject.toml`):
+
 ```bash
-Running verification test...
-Testing files/reference.m4a
-Response: [{"text":"Das ist ein Referenztext.","language":"German"}]
-PASS: 'referenz' found.
-Testing files/reference.mp3
-Response: [{"text":"Das ist ein Referenztext.","language":"German"}]
-PASS: 'referenz' found.
-Testing files/reference.wav
-Response: [{"text":"Das ist ein Referenztext.","language":"German"}]
-PASS: 'referenz' found.
-Results: 3 PASSED, 0 FAILED
+uv sync
+uv run client-streaming.py -e ws://127.0.0.1:8907/transcribe-streaming -f files/reference.pcm -l de
 ```
 
-### Streaming Client Tests
-Scripts `client-streaming.py` and `client-streaming.js` are provided to test the streaming endpoint.
-The `make test-streaming` target will automatically convert a sample MP3 to PCM and run both clients.
-
-```bash
-# Install local dependencies (Python venv + Node modules) - only required for testing
-make setup-local
-
-# Run streaming tests (requires container to be UP)
-make test-streaming
 ```
-
-```bash
-Running Python Streaming Test...
-Connecting to ws://127.0.0.1:8907/transcribe-streaming...
+Connecting to ws://127.0.0.1:8907/transcribe-streaming?language=de...
 Audio Duration: 2.06s
 Streaming files/reference.pcm...
 [19:00:53.518] [Server Ready]
-[19:00:53.520] [Partial] (): Finished sending audio.
-
+...
 [19:00:53.598] [Final] (German): Das ist ein Referenztext.
-
-Processing Time: 0.09s
-Real-Time Factor (RTF): 0.0457
-
-Running Node.js Streaming Test...
-Connecting to ws://127.0.0.1:8907/transcribe-streaming...
-Audio Duration: 2.06s
-Connected.
-
-[19:00:53.661] [ready] {"type":"ready"}
-Finished sending audio.
-[19:00:53.664] [Partial] 
-[19:00:53.741] [Final] Das ist ein Referenztext.
-
-Processing Time: 0.09s
-Real-Time Factor (RTF): 0.0431
-
-Disconnected.
 ```
 
-**RESULTS: How FAST is Qwen3-ASR?**:
-Qwen-ASR runs at roughly 20x real-time on a NVIDIA H200 NVL with Flash Attention 2.
-
-### Forced Aligner Tests
+The client expects raw PCM (16 kHz, 16-bit, mono). Convert other files with ffmpeg:
 
 ```bash
-make test-aligner
-```
-
-```bash
-Running Forced Alignment Verification Test...
-[
-  {
-    "text": "Das ist ein Referenztext.",
-    "language": "German",
-    "timestamps": {
-      "items": [
-        {
-          "text": "Das",
-          "start_time": 0.16,
-          "end_time": 0.32
-        },
-        {
-          "text": "ist",
-          "start_time": 0.32,
-          "end_time": 0.48
-        },
-        {
-          "text": "ein",
-          "start_time": 0.48,
-          "end_time": 0.64
-        },
-        {
-          "text": "Referenztext",
-          "start_time": 0.64,
-          "end_time": 1.68
-        }
-      ]
-    }
-  }
-]
-```
-
-**Manual Usage**:
-
-*Note: The clients expect raw PCM audio (16k, 16-bit, mono). MP3/WAV files must be converted first.*
-
-**Convert Audio to PCM**:
-```bash
-ffmpeg -i files/reference.mp3 -f s16le -ac 1 -ar 16000 files/reference.pcm
-```
-
-**Python Client**:
-```bash
-source .venv/bin/activate
-python client-streaming.py -e ws://localhost:8907/transcribe-streaming -f files/reference.pcm
-```
-
-**Node.js Client**:
-```bash
-node client-streaming.js -e ws://localhost:8907/transcribe-streaming -f files/reference.pcm
+ffmpeg -i input.mp3 -f s16le -ac 1 -ar 16000 input.pcm
 ```
 
 ## Benchmarking
 
-You can benchmark this server by running two commands:
-
-### Benchmark batching
-
-Defaults to 4 clients running 20 transcriptions in parallel.
+Defaults below: 4 concurrent clients, 20 requests each.
 
 ```bash
-make benchmark-batch
+# streaming (WebSocket)
+uv run benchmark.py --mode streaming --url ws://127.0.0.1:8907/transcribe-streaming --file files/reference.pcm --clients 4 --requests 20
+
+# batch (HTTP, uses curl)
+uv run benchmark.py --mode batch --url http://127.0.0.1:8907/transcribe --file files/reference.wav --clients 4 --requests 20
 ```
 
-#### Results
+Reference numbers from upstream (1x NVIDIA H200 NVL, `Qwen3-ASR-1.7B` + `Qwen3-ForcedAligner-0.6B`):
 
-1x NVIDIA H200 NVL:
+- VRAM: < 2 GB at peak, even with 80 concurrent streams.
+- Batch: 80 requests, avg QPS 28.5, latency P50 0.139 s.
+- Qwen3-ASR runs at roughly 20x real-time with Flash Attention 2.
 
-```bash
-Running Batch Benchmark (Concurrency: 4, Requests: 20)...
-Starting Benchmark: 4 clients, 20 requests each.
-
---- Benchmark Results ---
-Total Requests:     80
-Successful:         80
-Errors:             0
-Total Wall Time:    2.81s
-Avg QPS:            28.51
-
--- Latency (sec) --
-Avg:  0.138
-P50:  0.139
-P95:  0.142
-```
-
-### Benchmark streaming
-
-Defaults to 4 clients running 20 transcriptions in parallel.
-
-```bash
-make benchmark-streaming
-```
-
-#### Results
-
-1x NVIDIA H200 NVL:
-
-```bash
-Running Streaming Benchmark (Concurrency: 4, Requests: 20)...
-Starting Benchmark: 4 clients, 20 requests each.
-
---- Benchmark Results ---
-Total Requests:     80
-Successful:         80
-Errors:             0
-Total Wall Time:    6.09s
-Avg QPS:            13.14
-
--- Latency (sec) --
-Avg:  0.229
-P50:  0.230
-P95:  0.240
-
--- RTF --
-Avg:  0.1109
-P50:  0.1122
-P95:  0.1179
-```
-
+Upstream streaming numbers were measured before the streaming buffer fix
+(audio was re-fed cumulatively), so re-run the streaming benchmark on your hardware.

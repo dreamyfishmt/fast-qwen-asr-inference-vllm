@@ -4,6 +4,7 @@ import time
 import re
 import statistics
 import sys
+from pathlib import Path
 from asyncio import create_subprocess_exec, subprocess
 
 class BenchmarkStats:
@@ -62,6 +63,8 @@ class BenchmarkStats:
             print(f"P50:  {statistics.median(self.rtfs):.4f}")
             print(f"P95:  {statistics.quantiles(self.rtfs, n=20)[-1] if len(self.rtfs) > 1 else self.rtfs[0]:.4f}")
 
+CLIENT_SCRIPT = Path(__file__).resolve().parent / "client-streaming.py"
+
 async def run_command(cmd):
     t0 = time.time()
     proc = await create_subprocess_exec(
@@ -94,7 +97,7 @@ async def main():
         async with sem:
             for _ in range(args.requests):
                 if args.mode == "streaming":
-                    cmd = ["python", "client-streaming.py", "-e", args.url, "-f", args.file]
+                    cmd = [sys.executable, str(CLIENT_SCRIPT), "-e", args.url, "-f", args.file]
                     dur, out, err, rc = await run_command(cmd)
                     if rc == 0:
                         stats.add_streaming_result(out)
