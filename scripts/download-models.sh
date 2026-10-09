@@ -6,7 +6,8 @@
 #
 # 0.6b files come from their original Hugging Face repos; 1.7b comes from dreamyfishmt/qwen3-asr-1.7b-onnx
 # (files of andrewleech/qwen3-asr-1.7b-onnx and sorryhyun/qwen3-asr-onnx-gqa plus an FP16 encoder derived from
-# andrewleech's FP32 one; the FP32 encoder is skipped). All are pinned to the revisions the server was tested with. Uses `hf` if installed, otherwise `uvx --from huggingface_hub hf`.
+# andrewleech's FP32 one). All are pinned to the revisions the server was tested with.
+# Uses `hf` if installed, otherwise `uvx --from huggingface_hub hf`.
 set -euo pipefail
 
 usage() { echo "usage: $0 {0.6b|1.7b} MODEL_DIR" >&2; exit 2; }
@@ -17,7 +18,7 @@ root=$2
 # Revisions the server was tested with
 RHASSPY_0_6B=rhasspy/qwen3-asr-0.6b-onnx-int4-merged@9ea8c26bbf497ef74a84ce19202ce62246af8ab4
 SORRYHYUN_GQA=sorryhyun/qwen3-asr-onnx-gqa@075249f70b56cdded1cf4b189cbdde0fb77aeec1
-QWEN3_ASR_1_7B=dreamyfishmt/qwen3-asr-1.7b-onnx@79f42992fe1faad0d191d6d2e558b5ea2286d8b3
+QWEN3_ASR_1_7B=dreamyfishmt/qwen3-asr-1.7b-onnx@b0443f39a1e4904950107d028833a4620ecb2e93
 
 if command -v hf >/dev/null 2>&1; then
     HF=(hf)

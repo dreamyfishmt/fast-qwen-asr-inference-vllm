@@ -49,27 +49,24 @@ git clone https://github.com/dreamyfishmt/fast-qwen-asr-inference-vllm
 cd fast-qwen-asr-inference-vllm
 ```
 
-1. Download the model (~2.25 GB) from [`dreamyfishmt/qwen3-asr-1.7b-onnx`](https://huggingface.co/dreamyfishmt/qwen3-asr-1.7b-onnx),
-   pinned to the tested revision:
+1. Download the model (~2.25 GB) from [`dreamyfishmt/qwen3-asr-1.7b-onnx`](https://huggingface.co/dreamyfishmt/qwen3-asr-1.7b-onnx):
 
    ```bash
-   uvx --from huggingface_hub hf download dreamyfishmt/qwen3-asr-1.7b-onnx --exclude encoder.onnx \
-     --revision 79f42992fe1faad0d191d6d2e558b5ea2286d8b3 --local-dir /srv/models/qwen3-asr-1.7b-onnx
+   uvx --from huggingface_hub hf download dreamyfishmt/qwen3-asr-1.7b-onnx --local-dir /srv/models/qwen3-asr-1.7b-onnx
    # or: scripts/download-models.sh 1.7b /srv/models   # -> /srv/models/qwen3-asr-1.7b-onnx
    ```
 
    On Windows (PowerShell; `uvx` from [uv](https://docs.astral.sh/uv/)):
 
    ```powershell
-   uvx --from huggingface_hub hf download dreamyfishmt/qwen3-asr-1.7b-onnx --exclude encoder.onnx --revision 79f42992fe1faad0d191d6d2e558b5ea2286d8b3 --local-dir D:/models/qwen3-asr-1.7b-onnx
+   uvx --from huggingface_hub hf download dreamyfishmt/qwen3-asr-1.7b-onnx --local-dir D:/models/qwen3-asr-1.7b-onnx
    ```
 
    The repo repackages, unmodified, the embeddings and tokenizer of
    [`andrewleech/qwen3-asr-1.7b-onnx`](https://huggingface.co/andrewleech/qwen3-asr-1.7b-onnx) and the int4
    GroupQueryAttention decoder with fp16 I/O from [`sorryhyun/qwen3-asr-onnx-gqa`](https://huggingface.co/sorryhyun/qwen3-asr-onnx-gqa).
    The encoder `encoder.fp16.onnx` is an FP16 conversion of andrewleech's FP32 `encoder.onnx`; see the
-   [model card](https://huggingface.co/dreamyfishmt/qwen3-asr-1.7b-onnx) for source revisions and validation. Drop
-   `--exclude encoder.onnx` to also get the FP32 encoder (+1.27 GB), which the server prefers when it runs on the CPU.
+   [model card](https://huggingface.co/dreamyfishmt/qwen3-asr-1.7b-onnx) for source revisions and validation.
 
    If the download fails with a 401 from `cas-server.xethub.hf.co` (some proxies block Hugging Face's Xet storage),
    set `HF_HUB_DISABLE_XET=1` and run it again (the script does this automatically).
