@@ -1,7 +1,14 @@
-# Fast Qwen3-ASR Inference Server (vLLM Backend, FastAPI async processing)
+# Fast Qwen3-ASR Inference Server (vLLM / ONNX CPU backends, FastAPI async processing)
 
-A containerized Qwen3-ASR inference server using FastAPI and vLLM.
+A containerized Qwen3-ASR inference server using FastAPI.
 Provides HTTP `/transcribe` and WebSocket `/transcribe-streaming` endpoints.
+
+Two images, same API:
+
+| Image | Backend | Model | Hardware |
+|---|---|---|---|
+| `…:latest` | vLLM + `qwen-asr` | Qwen3-ASR-1.7B (FP8) | NVIDIA GPU (RTX 30 series or newer) |
+| `…:latest-cpu` | ONNX Runtime | Qwen3-ASR-0.6B (int4) | Any x86-64 / ARM64 CPU, 2+ GB RAM. See [CPU deployment](#cpu-deployment) |
 
 The server runs with Docker Compose and loads the models from a **local model directory**
 mounted into the container (read-only, offline — the HuggingFace Hub is never contacted).
@@ -113,6 +120,99 @@ image; add `-f compose.local.yaml` as well if you changed the Dockerfile:
 docker compose -f compose.yaml -f compose.dev.yaml up
 ```
 
+## CPU deployment
+
+For servers without a GPU, e.g. a small VPS that clients reach over the internet. Uses ONNX Runtime with
+Qwen3-ASR-0.6B quantized to int4 (~840 MB of model files); the image has no PyTorch or CUDA.
+
+The model folder combines two Hugging Face repos: the audio encoder, embeddings and tokenizer from
+[`rhasspy/qwen3-asr-0.6b-onnx-int4-merged`](https://huggingface.co/rhasspy/qwen3-asr-0.6b-onnx-int4-merged), and the
+text decoder from [`sorryhyun/qwen3-asr-onnx-gqa`](https://huggingface.co/sorryhyun/qwen3-asr-onnx-gqa)
+(built with GroupQueryAttention, so the cost per generated token stays almost flat as the utterance grows).
+
+1. Download the model:
+
+   ```bash
+   D=/srv/models/qwen3-asr-0.6b-onnx
+   uvx --from huggingface_hub hf download rhasspy/qwen3-asr-0.6b-onnx-int4-merged \
+     config.json tokenizer.json embed_tokens.bin encoder.int4.onnx encoder.int4.onnx.data --local-dir $D
+   uvx --from huggingface_hub hf download sorryhyun/qwen3-asr-onnx-gqa \
+     decoder-0.6b-fp32.onnx decoder-0.6b-fp32.onnx.data --local-dir $D
+   ```
+
+   (The rhasspy repo's own `decoder_merged.int4.onnx` also works if present and no `decoder-*.onnx` is, but it is
+   ~2× slower and more prone to repetition loops; `ONNX_DECODER` picks a decoder file explicitly.)
+
+2. Get `compose.cpu.yaml`, `Caddyfile` and `.env.cpu.example` from this repo, then:
+
+   ```bash
+   cp .env.cpu.example .env
+   # set MODEL_DIR, and API_TOKEN (e.g. `openssl rand -hex 32`)
+   ```
+
+3. Start, either:
+   - **HTTPS/WSS (recommended on the internet):** point a domain's DNS A record at the server, set `DOMAIN` and
+     `BIND_ADDR=127.0.0.1` in `.env`, open ports 80 and 443, and run
+     `docker compose -f compose.cpu.yaml --profile tls up -d`. Caddy gets a Let's Encrypt certificate
+     automatically. Clients use `wss://DOMAIN/transcribe-streaming`.
+   - **Plain WS:** `docker compose -f compose.cpu.yaml up -d` and clients use
+     `ws://SERVER_IP:8907/transcribe-streaming`. The token and audio travel unencrypted, so use this only on
+     a trusted network or behind your own TLS proxy.
+
+4. Check: `curl -H "Authorization: Bearer $API_TOKEN" https://DOMAIN/health`
+
+### How streaming works on CPU
+
+This export has no incremental decoder, so a `partial` result re-transcribes the utterance so far. To keep that
+affordable:
+
+- Partials run in the background every `STREAM_PARTIAL_INTERVAL_SEC` (2 s) for the first `STREAM_PARTIAL_MAX_SEC`
+  (20 s) of an utterance. Each one continues from the previous partial minus its last `STREAM_UNFIXED_TOKEN_NUM`
+  tokens (the rollback strategy of qwen-asr's own streaming), so it only generates the new part.
+- On `stop`, a partial still running is aborted and the final result is computed right away, again continuing
+  from the last partial.
+- Requests are transcribed one at a time; a partial is skipped when another request is being transcribed.
+
+Measured with 2 cores of an Intel Xeon (2.1 GHz, AVX-512) and audio sent at real-time speed; expect slower
+results on CPUs without AVX-512 / AMX:
+
+| Utterance | Delay from `stop` to `final` |
+|---|---|
+| 4 s | 1.4 s |
+| 6 s, fast speech (~60 characters) | 2.3–2.5 s |
+| 11 s | 2.9 s |
+| 23 s | 3.9 s |
+
+Memory: ~0.9 GB resident after loading, ~1.1 GB while serving short utterances, ~1.45 GB peak for a 51 s
+utterance. 2 GB of RAM works for dictation-length audio; 4 GB leaves headroom for `STREAM_MAX_SEC=60`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `API_TOKEN` | — (required) | Shared secret; clients send `Authorization: Bearer <token>` |
+| `ASR_MODEL_DIR` | `qwen3-asr-0.6b-onnx` | Model folder inside `MODEL_DIR` |
+| `ONNX_DECODER` | auto | Decoder file in the model folder (`decoder-*.onnx`, then `decoder_merged.int4.onnx`, then split) |
+| `ONNX_THREADS` | `0` (all cores) | ONNX Runtime threads |
+| `STREAM_PARTIALS` | `true` | Send live partial results |
+| `STREAM_PARTIAL_INTERVAL_SEC` | `2.0` | Seconds of new audio between partials |
+| `STREAM_PARTIAL_MAX_SEC` | `20` | No partials once the utterance is longer than this |
+| `STREAM_REUSE_PARTIAL` | `true` | Continue from the previous partial instead of decoding from scratch |
+| `STREAM_UNFIXED_CHUNK_NUM` / `STREAM_UNFIXED_TOKEN_NUM` | `2` / `5` | First N partials start from scratch; last K tokens are re-decoded |
+| `STREAM_MAX_SEC` | `60` | Audio beyond this per utterance is dropped (an `info` message is sent) |
+| `DOMAIN` | — | Domain for the `tls` profile (Caddy, automatic HTTPS) |
+
+Build the CPU image locally instead of pulling it:
+`docker compose -f compose.cpu.yaml -f compose.cpu.local.yaml up -d --build`.
+
+The CPU image has no ffmpeg: `POST /transcribe` accepts WAV/FLAC/OGG/MP3 (what libsndfile reads), and forced
+alignment is not available.
+
+## Authentication
+
+Set `API_TOKEN` to require a shared secret on every endpoint except `GET /ready` (used by the container
+healthcheck). Clients send `Authorization: Bearer <token>`, or `?token=<token>` where headers can't be set
+(e.g. browser WebSockets). Missing or wrong tokens get HTTP 401, or a rejected WebSocket handshake (HTTP 403).
+The CPU compose file requires it; for the GPU compose file it's optional (`API_TOKEN` in `.env`).
+
 ## Releasing
 
 Pushing a version tag builds the image with GitHub Actions (`.github/workflows/docker-publish.yml`)
@@ -125,11 +225,11 @@ git push origin v1.2.3
 
 | Tag pushed | Image tags |
 |---|---|
-| `v1.2.3` | `1.2.3`, `1.2`, `1`, `latest` |
-| `v1.2.3-rc.1` | `1.2.3-rc.1` (doesn't move `latest`) |
+| `v1.2.3` | GPU: `1.2.3`, `1.2`, `1`, `latest` · CPU: `1.2.3-cpu`, `1.2-cpu`, `1-cpu`, `latest-cpu` |
+| `v1.2.3-rc.1` | `1.2.3-rc.1`, `1.2.3-rc.1-cpu` (don't move `latest`) |
 
 The workflow can also be started manually (Actions → Publish Docker image → Run workflow); a manual run on a
-branch publishes `latest` only.
+branch publishes `latest` / `latest-cpu` only. The CPU image is built for linux/amd64 and linux/arm64.
 
 GHCR packages are private when first published. To pull without `docker login ghcr.io`, open the package
 (GitHub profile → Packages → fast-qwen-asr-inference-vllm → Package settings) and change its visibility to public.
@@ -190,7 +290,7 @@ Upload one or more audio files (any format ffmpeg can decode).
 
 - **URL**: `http://127.0.0.1:8907/transcribe?language=zh-CN`
 - **Body**: multipart/form-data, one or more `files` fields
-- **Query**: `language` (optional), `forced_alignment=true|false` (requires `ENABLE_ALIGNER_MODEL=true`)
+- **Query**: `language` (optional), `context` (optional, see below), `forced_alignment=true|false` (GPU image with `ENABLE_ALIGNER_MODEL=true`)
 - **Response**: `[{"text": "...", "language": "Chinese"}, ...]` (plus `timestamps` with forced alignment)
 
 ### `WS /transcribe-streaming`
@@ -203,8 +303,8 @@ Protocol:
 1. Client connects. If the models are still loading, the server holds the connection until they are ready
    (clients should apply a timeout while waiting for `ready`).
 2. Server → `{"type": "ready"}`
-3. Client → `{"type": "start", "format": "pcm_s16le", "sample_rate_hz": 16000}`
-   (anything other than 16 kHz `pcm_s16le` is rejected with an `error` and close code 1003)
+3. Client → `{"type": "start", "format": "pcm_s16le", "sample_rate_hz": 16000, "context": "..."}`
+   (anything other than 16 kHz `pcm_s16le` is rejected with an `error` and close code 1003; `context` is optional)
 4. Server → `{"type": "info", "message": "language=Chinese"}` (only when `language` was given)
 5. Client → binary frames: raw PCM, 16 kHz, 16-bit little-endian, mono (any size, e.g. 100 ms = 3200 bytes)
 6. Server → `{"type": "partial", "text": "...", "language": "Chinese"}` — the **full** transcript so far;
@@ -214,11 +314,21 @@ Protocol:
 
 Errors are sent as `{"type": "error", "message": "..."}` followed by a close
 (1002: audio before `start`, 1003: unsupported format/language, 1011: server not ready / internal error).
+With `API_TOKEN` set, a missing or wrong token rejects the handshake (HTTP 403).
+
+If the utterance exceeds `STREAM_MAX_SEC`, the server sends `{"type": "info", "message": "max_duration_reached=60s"}`
+and ignores further audio; `stop` still returns the final result.
+
+**Context (`context`).** Free text placed in the prompt's system turn to bias recognition toward specific
+spellings, e.g. `"Vocabulary: Kubernetes, QwenType, 张三"`. Keep it short; it is part of every decode.
 
 ## Testing
 
 > **Windows PowerShell:** use `curl.exe` instead of `curl` (in Windows PowerShell 5.1, `curl` is an alias
 > for `Invoke-WebRequest`).
+
+If `API_TOKEN` is set, add `-H "Authorization: Bearer $API_TOKEN"` to the curl commands; the streaming client
+reads `$API_TOKEN` (or `-t <token>`).
 
 Sample files are in `files/` (`reference.*` — German: "Das ist ein Referenztext.").
 

@@ -1,32 +1,23 @@
 import os
 import json
 import io
+import hmac
 import asyncio
 import logging
 import subprocess
 from typing import Optional, List, Tuple
 from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
-import time
 
 import uvicorn
 import numpy as np
 import soundfile as sf
-import torch
 import psutil
-from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect, Query, HTTPException
+from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-# Import Qwen-ASR components
-try:
-    from qwen_asr import Qwen3ASRModel, Qwen3ForcedAligner
-    from qwen_asr.inference.utils import SUPPORTED_LANGUAGES
-except ImportError:
-    print("Warning: qwen_asr not found.")
-    Qwen3ASRModel = None
-    Qwen3ForcedAligner = None
-    SUPPORTED_LANGUAGES = None
+from engines import create_engine
 
 # Logging
 logging.basicConfig(level=logging.INFO)
@@ -35,8 +26,7 @@ logger = logging.getLogger(__name__)
 # -----------------------------
 # Config
 # -----------------------------
-def get_env_bool(key: str, default: str = "true") -> bool:
-    return os.getenv(key, default).lower() in ("true", "1", "yes", "on")
+ASR_BACKEND = os.getenv("ASR_BACKEND", "vllm")
 
 MAX_CONCURRENT_DECODE = int(os.getenv("MAX_CONCURRENT_DECODE", "4"))
 MAX_CONCURRENT_INFER = int(os.getenv("MAX_CONCURRENT_INFER", "1"))  # GPU: usually 1
@@ -46,21 +36,27 @@ THREADPOOL_WORKERS = int(os.getenv("THREADPOOL_WORKERS", str((os.cpu_count() or 
 STREAM_MIN_SAMPLES = int(os.getenv("STREAM_MIN_SAMPLES", "1600"))  # 100ms @ 16kHz
 PARTIAL_INTERVAL_MS = int(os.getenv("PARTIAL_INTERVAL_MS", "120"))  # throttle partials
 STREAM_EXPECT_SR = int(os.getenv("STREAM_EXPECT_SR", "16000"))
+# Audio beyond this many seconds per utterance is dropped (0 = unlimited)
+STREAM_MAX_SEC = float(os.getenv("STREAM_MAX_SEC", "0"))
 
-# Streaming decoder params (qwen_asr init_streaming_state).
-# Smaller chunk size -> partial text updates more often, at the cost of more GPU calls.
-STREAM_CHUNK_SIZE_SEC = float(os.getenv("STREAM_CHUNK_SIZE_SEC", "2.0"))
-STREAM_UNFIXED_CHUNK_NUM = int(os.getenv("STREAM_UNFIXED_CHUNK_NUM", "2"))
-STREAM_UNFIXED_TOKEN_NUM = int(os.getenv("STREAM_UNFIXED_TOKEN_NUM", "5"))
+# Shared secret for clients: "Authorization: Bearer <token>" (or ?token=<token>). Empty = no auth.
+API_TOKEN = os.getenv("API_TOKEN", "").strip()
 
 # OpenCC config used when a Traditional Chinese variant (zh-TW, zh-HK, zh-Hant) is requested.
 OPENCC_TW_CONFIG = os.getenv("OPENCC_TW_CONFIG", "s2twp")
 OPENCC_HK_CONFIG = os.getenv("OPENCC_HK_CONFIG", "s2hk")
 
+SUPPORTED_LANGUAGES = [
+    "Chinese", "English", "Cantonese", "Arabic", "German", "French", "Spanish", "Portuguese",
+    "Indonesian", "Italian", "Korean", "Russian", "Thai", "Vietnamese", "Japanese", "Turkish",
+    "Hindi", "Malay", "Dutch", "Swedish", "Danish", "Finnish", "Polish", "Czech", "Filipino",
+    "Persian", "Greek", "Romanian", "Hungarian", "Macedonian",
+]
+
 # -----------------------------
 # App state
 # -----------------------------
-models = {}
+engine = create_engine(ASR_BACKEND)
 model_status = "starting"
 model_ready_event = asyncio.Event()
 
@@ -73,6 +69,15 @@ infer_sem = asyncio.Semaphore(MAX_CONCURRENT_INFER)
 async def to_thread_limited(sem: asyncio.Semaphore, fn, *args, **kwargs):
     async with sem:
         return await asyncio.to_thread(fn, *args, **kwargs)
+
+def token_ok(headers, query_params) -> bool:
+    if not API_TOKEN:
+        return True
+    supplied = query_params.get("token") or ""
+    auth = headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        supplied = auth[7:].strip()
+    return hmac.compare_digest(supplied.encode(), API_TOKEN.encode())
 
 LANGUAGE_MAP = {
     "en": "English", "de": "German", "fr": "French", "es": "Spanish",
@@ -110,7 +115,7 @@ def map_language(lang_code: Optional[str]) -> Tuple[Optional[str], Optional[str]
     if base in LANGUAGE_MAP:
         return LANGUAGE_MAP[base], None
     name = lang_code.strip().capitalize()
-    if SUPPORTED_LANGUAGES is None or name in SUPPORTED_LANGUAGES:
+    if name in SUPPORTED_LANGUAGES:
         return name, None
     raise ValueError(f"Unsupported language: {lang_code}")
 
@@ -153,107 +158,25 @@ def read_audio_file(file_bytes: bytes) -> Tuple[np.ndarray, int]:
 # -----------------------------
 async def load_models_background():
     global model_status
-    logger.info("Background task: Loading models...")
+    logger.info(f"Background task: Loading models (backend: {engine.name})...")
     model_status = "loading_models"
-
-    async def _load_asr():
-        global model_status
-        if not get_env_bool("ENABLE_ASR_MODEL", "true"):
-            logger.info("ASR Model disabled via ENABLE_ASR_MODEL.")
-            return
-        if Qwen3ASRModel is None:
-            raise RuntimeError("qwen_asr not installed (Qwen3ASRModel missing).")
-
-        model_name = os.getenv("ASR_MODEL_NAME", "Qwen/Qwen3-ASR-1.7B")
-        logger.info(f"Loading ASR Model: {model_name}...")
-        gpu_mem = float(os.getenv("GPU_MEMORY_UTILIZATION", "0.75"))
-        max_new_tokens = int(os.getenv("MAX_NEW_TOKENS", "4096"))
-        # vLLM quantization method, e.g. "modelopt" for ModelOpt FP8 checkpoints. Empty = from checkpoint config.
-        quantization = os.getenv("VLLM_QUANTIZATION", "").strip() or None
-        llm_kwargs = {"quantization": quantization} if quantization else {}
-        if quantization:
-            logger.info(f"Using vLLM quantization: {quantization}")
-
-        try:
-            models["asr"] = await asyncio.to_thread(
-                Qwen3ASRModel.LLM,
-                model=model_name,
-                gpu_memory_utilization=gpu_mem,
-                max_new_tokens=max_new_tokens,
-                **llm_kwargs,
-            )
-            logger.info("ASR Model loaded successfully.")
-        except Exception as e:
-            logger.exception(f"Failed to load ASR model: {e}")
-            model_status = "error"
-            raise
-
-    async def _load_aligner():
-        global model_status
-        if not get_env_bool("ENABLE_ALIGNER_MODEL", "true"):
-            logger.info("Aligner Model disabled via ENABLE_ALIGNER_MODEL.")
-            return
-        if Qwen3ForcedAligner is None:
-            raise RuntimeError("qwen_asr not installed (Qwen3ForcedAligner missing).")
-
-        aligner_name = os.getenv("ALIGNER_MODEL_NAME", "Qwen/Qwen3-ForcedAligner-0.6B")
-        logger.info(f"Loading Aligner Model: {aligner_name}...")
-
-        try:
-            models["aligner"] = await asyncio.to_thread(
-                Qwen3ForcedAligner.from_pretrained,
-                aligner_name,
-                dtype=torch.bfloat16,
-                device_map="cuda:0",
-            )
-            logger.info("Aligner Model loaded successfully.")
-        except Exception as e:
-            logger.exception(f"Failed to load Aligner model: {e}")
-            model_status = "error"
-            raise
-
     try:
-        await asyncio.gather(_load_asr(), _load_aligner())
-    except Exception:
-        # model_status already set to "error" by loaders
+        await asyncio.to_thread(engine.load)
+    except Exception as e:
+        logger.exception(f"Failed to load models: {e}")
+        model_status = "error"
         model_ready_event.set()  # don't hang endpoints
         return
 
     # Warmup (best-effort)
-    if "asr" in models:
-        logger.info("Warming up ASR model (best-effort)...")
-        model_status = "warming_up"
-        try:
-            dummy_wav = np.zeros(16000, dtype=np.float32)
-            dummy_sr = 16000
-
-            async with infer_sem:
-                await asyncio.to_thread(
-                    models["asr"].transcribe,
-                    audio=[(dummy_wav, dummy_sr)],
-                    language=["English"],
-                    return_time_stamps=False,
-                )
-
-            async with infer_sem:
-                state = await asyncio.to_thread(
-                    models["asr"].init_streaming_state,
-                    unfixed_chunk_num=STREAM_UNFIXED_CHUNK_NUM,
-                    unfixed_token_num=STREAM_UNFIXED_TOKEN_NUM,
-                    chunk_size_sec=STREAM_CHUNK_SIZE_SEC,
-                )
-
-            warmup_chunks = [320, 640, 1024, 3200] + [3200] * 25
-            for n in warmup_chunks:
-                async with infer_sem:
-                    await asyncio.to_thread(models["asr"].streaming_transcribe, dummy_wav[:n], state)
-
-            async with infer_sem:
-                await asyncio.to_thread(models["asr"].finish_streaming_transcribe, state)
-
-            logger.info("Warmup complete.")
-        except Exception as e:
-            logger.warning(f"Warmup failed (non-critical): {e}")
+    logger.info("Warming up ASR model (best-effort)...")
+    model_status = "warming_up"
+    try:
+        async with infer_sem:
+            await asyncio.to_thread(engine.warmup)
+        logger.info("Warmup complete.")
+    except Exception as e:
+        logger.warning(f"Warmup failed (non-critical): {e}")
 
     model_status = "ready"
     model_ready_event.set()
@@ -265,6 +188,8 @@ async def load_models_background():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting up Qwen3-ASR Server...")
+    if not API_TOKEN:
+        logger.warning("API_TOKEN is not set: the server accepts unauthenticated requests.")
 
     # Bigger threadpool helps when decoding + websocket buffering + other to_thread calls happen together.
     executor = ThreadPoolExecutor(max_workers=THREADPOOL_WORKERS)
@@ -277,9 +202,6 @@ async def lifespan(app: FastAPI):
     finally:
         # Shutdown
         task.cancel()
-        models.clear()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
         executor.shutdown(wait=False, cancel_futures=True)
         logger.info("Shutdown complete.")
 
@@ -296,34 +218,38 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def require_token(request: Request, call_next):
+    # /ready stays open for container healthchecks; it only reports the loading status.
+    if request.url.path != "/ready" and request.method != "OPTIONS" and not token_ok(request.headers, request.query_params):
+        return JSONResponse(status_code=401, content={"detail": "Invalid or missing API token"})
+    return await call_next(request)
+
 # -----------------------------
 # Endpoints
 # -----------------------------
 @app.get("/health")
 async def health():
     mem = psutil.virtual_memory()
+    proc = psutil.Process()
     info = {
         "status": model_status,
+        "backend": engine.name,
         "limits": {
             "max_concurrent_decode": MAX_CONCURRENT_DECODE,
             "max_concurrent_infer": MAX_CONCURRENT_INFER,
             "threadpool_workers": THREADPOOL_WORKERS,
+            "stream_max_sec": STREAM_MAX_SEC,
         },
-        "streaming": {
-            "chunk_size_sec": STREAM_CHUNK_SIZE_SEC,
-            "unfixed_chunk_num": STREAM_UNFIXED_CHUNK_NUM,
-            "unfixed_token_num": STREAM_UNFIXED_TOKEN_NUM,
-            "partial_interval_ms": PARTIAL_INTERVAL_MS,
-        },
+        "streaming": {**engine.streaming_config(), "partial_interval_ms": PARTIAL_INTERVAL_MS},
         "memory": {
             "ram_total_mb": mem.total // (1024 * 1024),
             "ram_available_mb": mem.available // (1024 * 1024),
             "ram_percent": mem.percent,
+            "process_rss_mb": proc.memory_info().rss // (1024 * 1024),
         },
     }
-    if torch.cuda.is_available():
-        info["memory"]["gpu_allocated_mb"] = torch.cuda.memory_allocated() // (1024 * 1024)
-        info["memory"]["gpu_reserved_mb"] = torch.cuda.memory_reserved() // (1024 * 1024)
+    info["memory"].update(engine.memory_info())
     return info
 
 @app.get("/ready")
@@ -337,14 +263,15 @@ async def ready():
 async def transcribe(
     files: List[UploadFile] = File(...),
     language: Optional[str] = Query(None, description="Language code (e.g. en, de, zh-CN, zh-TW). None for auto-detect."),
+    context: str = Query("", description="Context / vocabulary hints, e.g. 'Vocabulary: Kubernetes, QwenType.'"),
     forced_alignment: bool = Query(False, description="Enable forced alignment (timestamps)"),
 ):
     await model_ready_event.wait()
 
     if model_status != "ready":
         raise HTTPException(status_code=503, detail=f"Server not ready: {model_status}")
-    if "asr" not in models:
-        raise HTTPException(status_code=503, detail="ASR model is not enabled or failed to load.")
+    if forced_alignment and not engine.supports_alignment:
+        raise HTTPException(status_code=503, detail="Aligner model is not enabled or not supported by this backend.")
 
     try:
         full_lang, opencc_config = map_language(language)
@@ -362,41 +289,20 @@ async def transcribe(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid audio file: {e}")
 
-    # Inference (explicitly limited, because GPU concurrency is not free)
+    # Inference (explicitly limited, because GPU/CPU concurrency is not free)
     try:
         async with infer_sem:
-            results = await asyncio.to_thread(
-                models["asr"].transcribe,
-                audio=audio_batch,
-                language=[full_lang] * len(audio_batch),
-                return_time_stamps=False,
-            )
-
-        response_list = []
+            results = await asyncio.to_thread(engine.transcribe, audio_batch, full_lang, context)
 
         if forced_alignment:
-            if "aligner" not in models:
-                raise HTTPException(status_code=503, detail="Aligner model is not enabled or failed to load.")
-
-            texts = [r.text for r in results]  # align against the model's original script
-
+            texts = [text for text, _ in results]  # align against the model's original script
             async with infer_sem:
-                alignment_results = await asyncio.to_thread(
-                    models["aligner"].align,
-                    audio=audio_batch,
-                    text=texts,
-                    language=[full_lang] * len(audio_batch),
-                )
-
-            for i, res in enumerate(results):
-                response_list.append(
-                    {"text": convert(res.text), "language": res.language, "timestamps": alignment_results[i]}
-                )
-        else:
-            for res in results:
-                response_list.append({"text": convert(res.text), "language": res.language})
-
-        return response_list
+                alignment_results = await asyncio.to_thread(engine.align, audio_batch, texts, full_lang)
+            return [
+                {"text": convert(text), "language": lang, "timestamps": alignment_results[i]}
+                for i, (text, lang) in enumerate(results)
+            ]
+        return [{"text": convert(text), "language": lang} for text, lang in results]
 
     except HTTPException:
         raise
@@ -408,14 +314,19 @@ async def transcribe(
 async def websocket_endpoint(
     ws: WebSocket,
     language: Optional[str] = Query(None),
-    forced_alignment: bool = Query(False),  # kept for API symmetry; not yet used in streaming
+    forced_alignment: bool = Query(False),  # kept for API symmetry; not used in streaming
 ):
+    if not token_ok(ws.headers, ws.query_params):
+        # closing before accept rejects the handshake (HTTP 403)
+        await ws.close(code=1008, reason="Invalid or missing API token")
+        return
+
     await ws.accept()
 
     # do wait until we know the outcome
     await model_ready_event.wait()
 
-    if model_status != "ready" or "asr" not in models:
+    if model_status != "ready":
         await ws.close(code=1011, reason=f"Server not ready: {model_status}")
         return
 
@@ -426,23 +337,6 @@ async def websocket_endpoint(
         await ws.close(code=1003)
         return
     convert = get_converter(opencc_config)
-    client_sr = None
-    started = False
-
-    # Init streaming state off event loop + limited concurrency (GPU touch)
-    try:
-        async with infer_sem:
-            state = await asyncio.to_thread(
-                models["asr"].init_streaming_state,
-                language=full_lang,
-                unfixed_chunk_num=STREAM_UNFIXED_CHUNK_NUM,
-                unfixed_token_num=STREAM_UNFIXED_TOKEN_NUM,
-                chunk_size_sec=STREAM_CHUNK_SIZE_SEC,
-            )
-    except Exception as e:
-        logger.exception(f"Failed to init streaming state: {e}")
-        await ws.close(code=1011, reason="init_streaming_state failed")
-        return
 
     # Send ready
     try:
@@ -450,27 +344,33 @@ async def websocket_endpoint(
     except Exception:
         return
 
+    stream = None
     buf_parts: List[np.ndarray] = []
     buf_n = 0
+    total_samples = 0
+    max_samples = int(STREAM_MAX_SEC * STREAM_EXPECT_SR) if STREAM_MAX_SEC > 0 else 0
     last_partial_ts = 0.0
+    last_partial_text = ""
 
     async def flush_and_infer(send_partial: bool):
-        nonlocal buf_parts, buf_n, last_partial_ts
+        nonlocal buf_parts, buf_n, last_partial_ts, last_partial_text
         if buf_n <= 0:
             return
         chunk = np.concatenate(buf_parts, axis=0) if len(buf_parts) > 1 else buf_parts[0]
-        # streaming_transcribe() buffers/accumulates internally: feed only new samples
+        # streams buffer/accumulate internally: feed only new samples
         buf_parts = []
         buf_n = 0
 
         async with infer_sem:
-            await asyncio.to_thread(models["asr"].streaming_transcribe, chunk, state)
+            updated = await asyncio.to_thread(stream.feed, chunk, send_partial)
 
-        if send_partial:
-            now = time.monotonic()
-            if (now - last_partial_ts) * 1000.0 >= PARTIAL_INTERVAL_MS:
+        if send_partial and updated:
+            now = asyncio.get_running_loop().time()
+            text = convert(stream.text)
+            if text != last_partial_text and (now - last_partial_ts) * 1000.0 >= PARTIAL_INTERVAL_MS:
                 last_partial_ts = now
-                await ws.send_json({"type": "partial", "text": convert(state.text), "language": state.language})
+                last_partial_text = text
+                await ws.send_json({"type": "partial", "text": text, "language": stream.language})
 
     try:
         while True:
@@ -493,7 +393,6 @@ async def websocket_endpoint(
                     t = data.get("type")
 
                     if t == "start":
-                        started = True
                         client_sr = int(data.get("sample_rate_hz", 0)) if data.get("sample_rate_hz") else None
                         fmt = data.get("format")
 
@@ -504,24 +403,39 @@ async def websocket_endpoint(
                             await ws.close(code=1003)
                             return
 
+                        context = data.get("context") or ""
+                        if not isinstance(context, str):
+                            context = ""
+                        try:
+                            async with infer_sem:
+                                stream = await asyncio.to_thread(engine.new_stream, full_lang, context)
+                        except Exception as e:
+                            logger.exception(f"Failed to init stream: {e}")
+                            await ws.close(code=1011, reason="stream init failed")
+                            return
+
                         # Optional: acknowledge language selection
                         if full_lang is not None:
                             await ws.send_json({"type": "info", "message": f"language={full_lang}"})
                         continue
 
                     if t == "stop":
+                        if stream is None:
+                            await ws.send_json({"type": "error", "message": "stop before start"})
+                            await ws.close(code=1002)
+                            return
                         # Flush remainder, finish, send final
                         await flush_and_infer(send_partial=False)
                         async with infer_sem:
-                            await asyncio.to_thread(models["asr"].finish_streaming_transcribe, state)
+                            await asyncio.to_thread(stream.finish)
 
-                        await ws.send_json({"type": "final", "text": convert(state.text), "language": state.language})
+                        await ws.send_json({"type": "final", "text": convert(stream.text), "language": stream.language})
                         await ws.close(code=1000)
                         return
 
             # Audio frames
             if msg.get("bytes"):
-                if not started:
+                if stream is None:
                     # Require explicit start so we can validate format.
                     await ws.send_json({"type": "error", "message": "Send {type:'start', format:'pcm_s16le', sample_rate_hz:16000} first"})
                     await ws.close(code=1002)
@@ -532,6 +446,15 @@ async def websocket_endpoint(
                 audio_int16 = np.frombuffer(chunk_bytes, dtype=np.int16)
                 if audio_int16.size == 0:
                     continue
+
+                if max_samples:
+                    room = max_samples - total_samples
+                    if room <= 0:
+                        continue
+                    if audio_int16.size >= room:
+                        audio_int16 = audio_int16[:room]
+                        await ws.send_json({"type": "info", "message": f"max_duration_reached={STREAM_MAX_SEC:g}s"})
+                total_samples += audio_int16.size
 
                 audio_f32 = audio_int16.astype(np.float32) / 32768.0
                 buf_parts.append(audio_f32)

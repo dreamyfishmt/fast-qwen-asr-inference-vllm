@@ -20,10 +20,25 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # GPU: vLLM + CUDA (Dockerfile)
+          - variant: gpu
+            dockerfile: Dockerfile
+            suffix: ""
+            platforms: linux/amd64
+          # CPU: ONNX Runtime (Dockerfile.cpu), tags get a -cpu suffix
+          - variant: cpu
+            dockerfile: Dockerfile.cpu
+            suffix: "-cpu"
+            platforms: linux/amd64,linux/arm64
     steps:
       # The CUDA devel base + vLLM + torch image needs far more than the ~14 GB
       # a hosted runner has free by default.
       - name: Free disk space
+        if: matrix.variant == 'gpu'
         run: |
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
@@ -38,6 +53,9 @@ jobs:
       - name: Lowercase image name
         run: echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
 
+      - uses: docker/setup-qemu-action@v3
+        if: contains(matrix.platforms, 'arm64')
+
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -50,7 +68,10 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          # v1.2.3 -> 1.2.3, 1.2, 1, latest (pre-releases like v1.2.3-rc.1 don't move latest)
+          # v1.2.3 -> 1.2.3, 1.2, 1, latest (+ suffix: 1.2.3-cpu, ..., latest-cpu).
+          # Pre-releases like v1.2.3-rc.1 don't move latest.
+          flavor: |
+            suffix=${{ matrix.suffix }},onlatest=true
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -60,6 +81,8 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platforms }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

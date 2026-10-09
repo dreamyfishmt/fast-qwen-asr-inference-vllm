@@ -27,6 +27,8 @@ services:
       STREAM_UNFIXED_CHUNK_NUM: ${STREAM_UNFIXED_CHUNK_NUM:-2}
       STREAM_UNFIXED_TOKEN_NUM: ${STREAM_UNFIXED_TOKEN_NUM:-5}
       PARTIAL_INTERVAL_MS: ${PARTIAL_INTERVAL_MS:-120}
+      # Optional shared secret; clients send "Authorization: Bearer <API_TOKEN>"
+      API_TOKEN: ${API_TOKEN:-}
     volumes:
       - ${MODEL_DIR:?set MODEL_DIR in .env}:/models:ro
       - vllm_cache:/cache/vllm

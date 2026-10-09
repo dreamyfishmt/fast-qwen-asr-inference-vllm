@@ -1,0 +1,9 @@
+# Local build overlay for the CPU image:
+#   docker compose -f compose.cpu.yaml -f compose.cpu.local.yaml up -d --build
+services:
+  asr:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    image: qwen3-asr-server:local-cpu
+    pull_policy: build

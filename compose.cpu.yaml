@@ -1,0 +1,53 @@
+# CPU-only deployment (ONNX Runtime, Qwen3-ASR-0.6B int4). See README.md ("CPU deployment").
+#   docker compose -f compose.cpu.yaml up -d                  # plain HTTP/WS on PORT
+#   docker compose -f compose.cpu.yaml --profile tls up -d    # + Caddy with automatic HTTPS for DOMAIN
+name: qwen3-asr-cpu
+
+services:
+  asr:
+    image: ${IMAGE:-ghcr.io/dreamyfishmt/fast-qwen-asr-inference-vllm}:${IMAGE_TAG:-latest-cpu}
+    container_name: ${CONTAINER:-qwen3-asr-cpu}
+    ports:
+      # With the tls profile, set BIND_ADDR=127.0.0.1 so only Caddy is reachable from outside.
+      - "${BIND_ADDR:-0.0.0.0}:${PORT:-8907}:8000"
+    environment:
+      ASR_BACKEND: onnx
+      ASR_MODEL_NAME: /models/${ASR_MODEL_DIR:-qwen3-asr-0.6b-onnx}
+      # Required: clients send "Authorization: Bearer <API_TOKEN>"
+      API_TOKEN: ${API_TOKEN:?set API_TOKEN in .env}
+      ONNX_THREADS: ${ONNX_THREADS:-0}
+      MAX_CONCURRENT_INFER: "1"
+      STREAM_PARTIALS: ${STREAM_PARTIALS:-true}
+      STREAM_PARTIAL_INTERVAL_SEC: ${STREAM_PARTIAL_INTERVAL_SEC:-2.0}
+      STREAM_PARTIAL_MAX_SEC: ${STREAM_PARTIAL_MAX_SEC:-20}
+      STREAM_REUSE_PARTIAL: ${STREAM_REUSE_PARTIAL:-true}
+      STREAM_MAX_SEC: ${STREAM_MAX_SEC:-60}
+      THREADPOOL_WORKERS: "8"
+    volumes:
+      - ${MODEL_DIR:?set MODEL_DIR in .env}:/models:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=3).status == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["tls"]
+    depends_on: [asr]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env for the tls profile}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

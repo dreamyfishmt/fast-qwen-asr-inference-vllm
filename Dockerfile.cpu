@@ -1,0 +1,26 @@
+# Qwen3-ASR server, CPU-only (ONNX Runtime). No PyTorch, no CUDA.
+# Built and started via compose.cpu.yaml; see README.md ("CPU deployment").
+
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN pip install \
+        "onnxruntime>=1.20" onnx "tokenizers>=0.20" numpy scipy \
+        fastapi "uvicorn>=0.30" websockets python-multipart soundfile psutil \
+        opencc-python-reimplemented
+
+RUN useradd --create-home --uid 1000 app
+WORKDIR /app
+COPY server.py /app/server.py
+COPY engines /app/engines
+
+USER app
+ENV ASR_BACKEND=onnx \
+    # fewer glibc malloc arenas: keeps RSS from creeping up across requests
+    MALLOC_ARENA_MAX=2
+EXPOSE 8000
+
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]
