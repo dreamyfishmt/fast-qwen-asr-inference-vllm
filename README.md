@@ -59,3 +59,19 @@ server, then set the connection in the tray menu → **ASR Server…**:
 
 Other clients: anything built for OpenAI's transcription API works with `base_url=http://HOST:8907/v1`
 (see [API](docs/api.md#post-v1audiotranscriptions-openai-compatible)).
+
+## License
+
+Copyright (C) 2026 dreamyfishmt and contributors.
+
+This program is free software: you can redistribute it and/or modify it under the terms of the
+[GNU Affero General Public License](LICENSE) as published by the Free Software Foundation, either version 3 of
+the License, or (at your option) any later version. It is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+If you run a modified version of this server for users over a network, the AGPL requires you to offer them the
+corresponding source code of your version (section 13).
+
+Third-party parts keep their own licenses: the ONNX pipeline in `asr_server/engines/onnx_engine.py` follows
+rhasspy/wyoming-faster-whisper (MIT License, Copyright (c) 2025 Michael Hansen). The models are downloaded
+separately and are covered by their own licenses (see their Hugging Face model cards).

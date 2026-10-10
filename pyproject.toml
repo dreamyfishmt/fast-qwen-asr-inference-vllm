@@ -3,6 +3,8 @@ name = "qwen3-asr-server"
 version = "0.1.0"
 description = "Qwen3-ASR speech recognition server (FastAPI) with ONNX Runtime and vLLM backends"
 requires-python = ">=3.11,<3.14"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
 # Shared by every backend. A backend is picked with one of the extras below:
 #   uv sync --extra cpu    ONNX Runtime on the CPU (Dockerfile.cpu)
 #   uv sync --extra gpu    ONNX Runtime + CUDA 13 (Dockerfile.gpu)
