@@ -1,5 +1,5 @@
 # Qwen3-ASR (vLLM backend) FastAPI server.
-# Built and started via compose.yaml; see README.md.
+# Built and started via compose.yaml; see docs/deployment-vllm.md.
 
 ARG CUDA_VERSION=12.8.0
 # "runtime" keeps the image small: torch and vLLM ship their own CUDA kernels and libraries.
@@ -9,12 +9,10 @@ ARG from=nvidia/cuda:${CUDA_VERSION}-${CUDA_FLAVOR}-ubuntu22.04
 FROM ${from} AS base
 
 ARG DEBIAN_FRONTEND=noninteractive
-# gcc + python3-dev: Triton (used by vLLM's torch.compile) builds a small C launcher at runtime
+# gcc: Triton (used by vLLM's torch.compile) builds a small C launcher at runtime
+# (the uv-managed Python below ships its own headers).
 RUN <<EOF
-apt update -y && apt upgrade -y && apt install -y --no-install-recommends  \
-    python3 \
-    python3-pip \
-    python3-dev \
+apt update -y && apt install -y --no-install-recommends  \
     gcc \
     libc6-dev \
     libsndfile1 \
@@ -23,37 +21,41 @@ apt update -y && apt upgrade -y && apt install -y --no-install-recommends  \
 && rm -rf /var/lib/apt/lists/*
 EOF
 
-RUN ln -s /usr/bin/python3 /usr/bin/python
+COPY --from=ghcr.io/astral-sh/uv:0.11.32 /uv /usr/local/bin/uv
+
+# Ubuntu 22.04 ships Python 3.10; uv installs a standalone Python 3.12 and the locked dependencies
+# (`--frozen`: fail instead of re-resolving if uv.lock is out of date).
+ENV PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON=3.12 \
+    UV_PYTHON_INSTALL_DIR=/opt/python \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    PATH=/opt/venv/bin:$PATH
 
 WORKDIR /app
-
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip3 install -U pip setuptools wheel
-
-# A distro-installed python3-blinker (no pip metadata) makes pip fail when a dependency upgrades it.
-# The runtime base doesn't ship it, but derived bases (e.g. with software-properties-common) may.
-RUN if dpkg -s python3-blinker >/dev/null 2>&1; then apt-get remove -y python3-blinker; fi
-
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip3 install -U "qwen-asr[vllm]" fastapi uvicorn python-multipart requests soundfile scipy websockets psutil \
-        opencc-python-reimplemented
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    uv sync --frozen --no-dev --no-install-project --extra vllm
 
 # flash-attn only speeds up the forced aligner (Transformers backend); vLLM brings its own attention
-# kernels. Off by default: without a matching prebuilt wheel it compiles from source, which needs
-# CUDA_FLAVOR=devel and takes a long time (MAX_JOBS limits parallel compile jobs).
+# kernels. Off by default and not part of uv.lock: it is compiled against the installed torch, which
+# needs CUDA_FLAVOR=devel and takes a long time (MAX_JOBS limits parallel compile jobs).
 ARG BUNDLE_FLASH_ATTENTION=false
 ARG MAX_JOBS=8
-RUN --mount=type=cache,target=/root/.cache/pip \
+RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$BUNDLE_FLASH_ATTENTION" = "true" ]; then \
         if ! command -v nvcc >/dev/null 2>&1 && [ ! -x /usr/local/cuda/bin/nvcc ]; then \
             echo "BUNDLE_FLASH_ATTENTION=true needs the CUDA toolkit: build with CUDA_FLAVOR=devel" >&2; exit 1; \
         fi; \
-        apt update -y && apt install -y --no-install-recommends g++ ninja-build && rm -rf /var/lib/apt/lists/* \
-        && MAX_JOBS=${MAX_JOBS} NVCC_THREADS=2 pip3 install -U flash-attn --no-build-isolation; \
+        apt update -y && apt install -y --no-install-recommends g++ && rm -rf /var/lib/apt/lists/* \
+        && uv pip install --python /opt/venv/bin/python setuptools wheel ninja packaging \
+        && MAX_JOBS=${MAX_JOBS} NVCC_THREADS=2 uv pip install --python /opt/venv/bin/python --no-build-isolation flash-attn; \
     fi
 
 COPY server.py /app/server.py
-COPY engines /app/engines
+COPY asr_server /app/asr_server
 
 # FlashInfer's sampling kernels may be JIT-compiled with nvcc, which the runtime image lacks.
 # ASR decodes greedily, so vLLM's own sampler is all that's needed.

@@ -1,4 +1,4 @@
-# CPU-only deployment (ONNX Runtime, Qwen3-ASR-0.6B int4). See README.md ("CPU deployment").
+# CPU-only deployment (ONNX Runtime, Qwen3-ASR-0.6B int4). See docs/deployment-cpu.md.
 #   docker compose -f compose.cpu.yaml up -d                  # plain HTTP/WS on PORT
 #   docker compose -f compose.cpu.yaml --profile tls up -d    # + Caddy with automatic HTTPS for DOMAIN
 name: qwen3-asr-cpu

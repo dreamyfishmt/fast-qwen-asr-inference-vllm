@@ -32,6 +32,8 @@ from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from ..audio import resample
+from ..config import env
 from . import Audio, Engine, Stream
 
 logger = logging.getLogger(__name__)
@@ -66,36 +68,48 @@ MASK_BLOCKED = np.finfo(np.float32).min
 ENCODER_WINDOW_FRAMES = 800
 
 
-def _env_bool(key: str, default: str) -> bool:
-    return os.getenv(key, default).lower() in ("true", "1", "yes", "on")
+GROUP = "ONNX backend"
 
-
-ONNX_THREADS = int(os.getenv("ONNX_THREADS", "0")) or (os.cpu_count() or 1)
+ASR_MODEL_NAME = env("ASR_MODEL_NAME", "/models/qwen3-asr-0.6b-onnx", "Model directory", group=GROUP)
+ONNX_THREADS = env("ONNX_THREADS", 0, "ONNX Runtime intra-op threads (0 = all cores)", group=GROUP) or (os.cpu_count() or 1)
 # The CPU memory arena keeps peak allocations around for reuse; off by default to keep RSS low.
-ONNX_MEM_ARENA = _env_bool("ONNX_MEM_ARENA", "false")
-# Encoder segment length in 8 s windows (0 = whole utterance in one pass)
-ENCODER_SEGMENT_WINDOWS = int(os.getenv("ONNX_ENCODER_SEGMENT_WINDOWS", "1"))
-MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "1024"))
-# Decoder graph file in the model dir (empty = auto-detect: gqa, then merged, then split)
-ONNX_DECODER = os.getenv("ONNX_DECODER", "").strip()
-# Encoder graph file (empty = encoder.int4.onnx, else encoder.fp16.onnx on the GPU / encoder.onnx on the CPU)
-ONNX_ENCODER = os.getenv("ONNX_ENCODER", "").strip()
-# Execution provider: cpu, or cuda (onnxruntime-gpu; falls back to CPU if CUDA can't be loaded)
-ONNX_PROVIDER = os.getenv("ONNX_PROVIDER", "cpu").strip().lower()
-ONNX_DEVICE_ID = int(os.getenv("ONNX_DEVICE_ID", "0"))
+ONNX_MEM_ARENA = env("ONNX_MEM_ARENA", False, "Use ONNX Runtime's CPU memory arena (faster, higher RSS)", group=GROUP)
+ENCODER_SEGMENT_WINDOWS = env(
+    "ONNX_ENCODER_SEGMENT_WINDOWS", 1, "Encoder segment length in 8 s windows (0 = whole utterance in one pass)", group=GROUP,
+)
+MAX_NEW_TOKENS = env("MAX_NEW_TOKENS", 1024, "Most tokens generated per transcription", group=GROUP)
+ONNX_DECODER = env(
+    "ONNX_DECODER", "", "Decoder graph file in the model directory (empty = auto-detect: gqa, then merged, then split)", group=GROUP,
+)
+ONNX_ENCODER = env(
+    "ONNX_ENCODER", "",
+    "Encoder graph file (empty = `encoder.int4.onnx`, else `encoder.fp16.onnx` on the GPU / `encoder.onnx` on the CPU)",
+    group=GROUP,
+)
+ONNX_PROVIDER = env(
+    "ONNX_PROVIDER", "cpu", "Execution provider: `cpu`, or `cuda` (onnxruntime-gpu; falls back to CPU if CUDA can't be loaded)",
+    group=GROUP,
+).lower()
+ONNX_DEVICE_ID = env("ONNX_DEVICE_ID", 0, "GPU index for `ONNX_PROVIDER=cuda`", group=GROUP)
 
-STREAM_PARTIALS = _env_bool("STREAM_PARTIALS", "true")
-STREAM_PARTIAL_INTERVAL_SEC = float(os.getenv("STREAM_PARTIAL_INTERVAL_SEC", "2.0"))
-STREAM_PARTIAL_MAX_SEC = float(os.getenv("STREAM_PARTIAL_MAX_SEC", "20.0"))
+STREAM_PARTIALS = env("STREAM_PARTIALS", True, "Send live partial results", group=GROUP)
+STREAM_PARTIAL_INTERVAL_SEC = env("STREAM_PARTIAL_INTERVAL_SEC", 2.0, "Seconds of new audio between partials", group=GROUP)
+STREAM_PARTIAL_MAX_SEC = env("STREAM_PARTIAL_MAX_SEC", 20.0, "No partials once the utterance is longer than this", group=GROUP)
 # Each partial and the final result continue from the previous partial (minus its last
 # STREAM_UNFIXED_TOKEN_NUM tokens) instead of decoding the whole utterance again; the first
 # STREAM_UNFIXED_CHUNK_NUM partials start from scratch. Same rollback strategy as qwen-asr's streaming.
-STREAM_REUSE_PARTIAL = _env_bool("STREAM_REUSE_PARTIAL", "true")
+STREAM_REUSE_PARTIAL = env(
+    "STREAM_REUSE_PARTIAL", True, "Continue from the previous partial instead of decoding from scratch", group=GROUP,
+)
 # Whether the final result also continues from the last partial. Saves time on CPU, but an error in an
 # early partial can survive into the final text; with a GPU a full re-decode is cheap, so turn it off there.
-STREAM_FINAL_REUSE_PARTIAL = _env_bool("STREAM_FINAL_REUSE_PARTIAL", "true")
-STREAM_UNFIXED_CHUNK_NUM = int(os.getenv("STREAM_UNFIXED_CHUNK_NUM", "2"))
-STREAM_UNFIXED_TOKEN_NUM = int(os.getenv("STREAM_UNFIXED_TOKEN_NUM", "5"))
+STREAM_FINAL_REUSE_PARTIAL = env(
+    "STREAM_FINAL_REUSE_PARTIAL", True,
+    "The final result also continues from the last partial (faster on CPU; an early partial's error can survive)",
+    group=GROUP,
+)
+STREAM_UNFIXED_CHUNK_NUM = env("STREAM_UNFIXED_CHUNK_NUM", 2, "First N partials start from scratch", group=GROUP)
+STREAM_UNFIXED_TOKEN_NUM = env("STREAM_UNFIXED_TOKEN_NUM", 5, "Last K tokens of the previous partial are re-decoded", group=GROUP)
 
 
 def _mel_filterbank() -> np.ndarray:
@@ -149,21 +163,6 @@ def log_mel_spectrogram(audio: np.ndarray, mel_filters: np.ndarray) -> np.ndarra
     log_spec = (log_spec + 4.0) / 4.0
     log_spec = log_spec[:, :-1]  # match WhisperFeatureExtractor's frame count
     return log_spec[np.newaxis, :, :].astype(np.float32)
-
-
-def resample(audio: np.ndarray, sr: int) -> np.ndarray:
-    if sr == RATE:
-        return audio
-    try:
-        from math import gcd
-
-        from scipy.signal import resample_poly
-
-        g = gcd(sr, RATE)
-        return resample_poly(audio, RATE // g, sr // g).astype(np.float32)
-    except ImportError:
-        n = int(round(audio.shape[0] * RATE / sr))
-        return np.interp(np.linspace(0, audio.shape[0] - 1, n), np.arange(audio.shape[0]), audio).astype(np.float32)
 
 
 def last_logits_graph(src: Path) -> bytes:
@@ -461,7 +460,7 @@ class OnnxEngine(Engine):
     provider = ONNX_PROVIDER
 
     def __init__(self):
-        self.model_dir = Path(os.getenv("ASR_MODEL_NAME", "/models/qwen3-asr-0.6b-onnx"))
+        self.model_dir = Path(ASR_MODEL_NAME)
         self._lock = threading.Lock()
         # one transcription at a time; partials skip instead of waiting (see OnnxStream)
         self.infer_lock = threading.Lock()
@@ -710,7 +709,7 @@ class OnnxEngine(Engine):
             if wav.ndim > 1:
                 wav = wav.mean(axis=1)
             with self.infer_lock:
-                out.append(self.transcribe_one(resample(wav.astype(np.float32), sr), language, context))
+                out.append(self.transcribe_one(resample(wav.astype(np.float32, copy=False), sr, RATE), language, context))
         return out
 
     def new_stream(self, language: Optional[str], context: str = "") -> Stream:

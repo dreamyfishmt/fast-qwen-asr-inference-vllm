@@ -1,21 +1,27 @@
 # Qwen3-ASR server, CPU-only (ONNX Runtime). No PyTorch, no CUDA.
-# Built and started via compose.cpu.yaml; see README.md ("CPU deployment").
+# Built and started via compose.cpu.yaml; see docs/deployment-cpu.md.
 
 FROM python:3.12-slim
 
-ENV PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+COPY --from=ghcr.io/astral-sh/uv:0.11.32 /uv /usr/local/bin/uv
 
-RUN pip install \
-        "onnxruntime>=1.20" onnx "tokenizers>=0.20" numpy scipy \
-        fastapi "uvicorn>=0.30" websockets python-multipart soundfile psutil \
-        opencc-python-reimplemented
+# Dependencies come from uv.lock (`--frozen`: fail instead of re-resolving if it is out of date).
+ENV PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    PATH=/opt/venv/bin:$PATH
+
+WORKDIR /app
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    uv sync --frozen --no-dev --no-install-project --extra cpu
 
 RUN useradd --create-home --uid 1000 app
-WORKDIR /app
 COPY server.py /app/server.py
-COPY engines /app/engines
+COPY asr_server /app/asr_server
 
 USER app
 ENV ASR_BACKEND=onnx \
