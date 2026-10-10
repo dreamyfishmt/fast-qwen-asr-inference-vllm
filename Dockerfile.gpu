@@ -23,7 +23,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project --extra gpu
 
 RUN useradd --create-home --uid 1000 app
-COPY LICENSE /app/LICENSE
 COPY server.py /app/server.py
 COPY asr_server /app/asr_server
 

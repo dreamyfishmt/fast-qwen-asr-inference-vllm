@@ -54,7 +54,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && MAX_JOBS=${MAX_JOBS} NVCC_THREADS=2 uv pip install --python /opt/venv/bin/python --no-build-isolation flash-attn; \
     fi
 
-COPY LICENSE /app/LICENSE
 COPY server.py /app/server.py
 COPY asr_server /app/asr_server
 
