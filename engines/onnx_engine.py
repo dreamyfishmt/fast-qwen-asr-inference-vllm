@@ -194,6 +194,37 @@ def last_logits_graph(src: Path) -> bytes:
     return model.SerializeToString()
 
 
+# Graph input added by host_total_seqlen_graph()
+TOTAL_SEQLEN_INPUT = "total_sequence_length_host"
+
+
+def host_total_seqlen_graph(src: Path) -> bytes:
+    """Serialized copy of a GQA decoder graph that takes total_sequence_length as a host input.
+
+    The onnxruntime-genai export computes GroupQueryAttention's total_sequence_length from
+    attention_mask inside the graph. On CUDA that runs on the GPU and is copied back into pinned
+    host memory, which GQA (onnxruntime-gpu >= 1.24) doesn't count as CPU memory and reads as 0:
+    the present KV cache is sized for 0 tokens ("illegal memory access" in 1.30, "Flash total
+    sequence length must be positive" in 1.31). Fed from numpy, the value stays in CPU memory.
+    """
+    import onnx
+    from onnx import TensorProto, helper
+
+    model = onnx.load(str(src), load_external_data=False)
+    graph = model.graph
+    gqa = [n for n in graph.node if n.op_type == "GroupQueryAttention"]
+    old = {n.input[6] for n in gqa}
+    if not gqa or len(old) != 1:
+        raise ValueError(f"expected GroupQueryAttention nodes sharing one total_sequence_length, got {old}")
+    old = old.pop()
+    for n in gqa:
+        n.input[6] = TOTAL_SEQLEN_INPUT
+    if not any(old in n.input for n in graph.node) and old not in {o.name for o in graph.output}:
+        graph.node.remove(next(n for n in graph.node if old in n.output))
+    graph.input.append(helper.make_tensor_value_info(TOTAL_SEQLEN_INPUT, TensorProto.INT32, []))
+    return model.SerializeToString()
+
+
 def _repeat_tail(tokens: List[int]) -> int:
     """Length of a degenerate repetition loop at the end of `tokens` (0 if none).
 
@@ -326,6 +357,7 @@ class _GqaDecoder:
         self.past_names = [n for n in inputs if n.startswith("past_key_values.")]
         self.present_names = ["present." + n[len("past_key_values."):] for n in self.past_names]
         self.outputs = ["logits"] + self.present_names
+        self.host_total = TOTAL_SEQLEN_INPUT in inputs
         self.device, self.device_id = device, device_id
         empty = np.zeros((1, kv_heads, 0, head_dim), dtype=self.dtype)
         if device:
@@ -340,16 +372,16 @@ class _GqaDecoder:
         past, length = state
         total = length + embeds.shape[1]
         embeds = embeds.astype(self.dtype, copy=False)
-        mask = np.ones((1, total), dtype=np.int64)
+        feeds = {"inputs_embeds": embeds, "attention_mask": np.ones((1, total), dtype=np.int64)}
+        if self.host_total:
+            feeds[TOTAL_SEQLEN_INPUT] = np.array(total, dtype=np.int32)
         if not self.device:
-            out = self.sess.run(
-                self.outputs, {"inputs_embeds": embeds, "attention_mask": mask, **dict(zip(self.past_names, past))}
-            )
+            out = self.sess.run(self.outputs, {**feeds, **dict(zip(self.past_names, past))})
             return out[0], (out[1:], total)
 
         binding = self.sess.io_binding()
-        binding.bind_cpu_input("inputs_embeds", embeds)
-        binding.bind_cpu_input("attention_mask", mask)
+        for name, value in feeds.items():
+            binding.bind_cpu_input(name, value)
         for name, value in zip(self.past_names, past):
             binding.bind_ortvalue_input(name, value)
         binding.bind_output("logits", "cpu")
@@ -472,11 +504,12 @@ class OnnxEngine(Engine):
         elif ONNX_PROVIDER != "cpu":
             raise RuntimeError(f"Unknown ONNX_PROVIDER: {ONNX_PROVIDER!r} (expected 'cpu' or 'cuda')")
 
-        def session(name: str, last_logits: bool = False):
+        def session(name: str, patch=None):
+            """Inference session for `name`, optionally with its graph rewritten by `patch` (path -> bytes)."""
             path = d / name
-            if last_logits:
+            if patch is not None:
                 try:
-                    model = last_logits_graph(path)
+                    model = patch(path)
                     patched = ort.SessionOptions()
                     for attr in ("intra_op_num_threads", "inter_op_num_threads", "execution_mode",
                                  "graph_optimization_level", "enable_cpu_mem_arena"):
@@ -484,7 +517,7 @@ class OnnxEngine(Engine):
                     patched.add_session_config_entry("session.model_external_initializers_file_folder_path", str(d))
                     return ort.InferenceSession(model, sess_options=patched, providers=providers)
                 except Exception as e:
-                    logger.warning(f"Could not patch {name} for last-position logits ({e}); using it unchanged")
+                    logger.warning(f"Could not apply {patch.__name__} to {name} ({e}); using it unchanged")
             return ort.InferenceSession(str(path), sess_options=opts, providers=providers)
 
         def pick_encoder(gpu: bool) -> str:
@@ -523,12 +556,13 @@ class OnnxEngine(Engine):
             name = "decoder_init.int4.onnx"
 
         if name == "decoder_init.int4.onnx":
-            self._decoder = _SplitDecoder(session(name, last_logits=True), session("decoder_step.int4.onnx"))
+            self._decoder = _SplitDecoder(session(name, last_logits_graph), session("decoder_step.int4.onnx"))
         elif name == MERGED_DECODER:
-            self._decoder = _MergedDecoder(session(name, last_logits=True))
+            self._decoder = _MergedDecoder(session(name, last_logits_graph))
         else:
+            # On CUDA, feed GQA's total_sequence_length from the host (see host_total_seqlen_graph)
             self._decoder = _GqaDecoder(
-                session(name), dec_cfg["num_key_value_heads"], dec_cfg["head_dim"], device, ONNX_DEVICE_ID
+                session(name, host_total_seqlen_graph if device else None), dec_cfg["num_key_value_heads"], dec_cfg["head_dim"], device, ONNX_DEVICE_ID
             )
         logger.info(f"Using {self._decoder.layout} decoder ({name}), encoder {encoder}, provider {self.provider}")
 
