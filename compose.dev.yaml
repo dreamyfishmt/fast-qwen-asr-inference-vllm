@@ -1,8 +1,8 @@
-# Development overlay: run server.py from the working tree with auto-reload.
+# Development overlay: run the server from the working tree with auto-reload.
 #   docker compose -f compose.yaml -f compose.dev.yaml up
 services:
   asr:
     volumes:
       - ./server.py:/app/server.py:ro
-      - ./engines:/app/engines:ro
+      - ./asr_server:/app/asr_server:ro
     command: ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

@@ -1,5 +1,5 @@
 # NVIDIA GPU deployment with ONNX Runtime (Qwen3-ASR-1.7B: int4 decoder, FP16 encoder).
-# See README.md ("Quick start: GPU (ONNX Runtime)").
+# See docs/deployment-gpu.md.
 #   docker compose -f compose.gpu.yaml up -d                  # HTTP/WS on PORT
 #   docker compose -f compose.gpu.yaml --profile tls up -d    # + Caddy with automatic HTTPS for DOMAIN
 name: qwen3-asr-gpu

@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.32"
+          enable-cache: true
+
+      - name: Check that uv.lock matches pyproject.toml
+        run: uv lock --check
+
+      - name: Install (CPU backend + dev tools)
+        run: uv sync --frozen --extra cpu
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Test
+        run: uv run pytest -v
+
+  build-cpu-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.cpu
+          push: false
+          tags: qwen3-asr:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test (server starts; /ready reports the missing model)
+        run: |
+          docker run -d --name asr -p 8000:8000 -e EXIT_ON_LOAD_FAILURE=false qwen3-asr:ci
+          for i in $(seq 1 30); do
+            status=$(curl -s http://127.0.0.1:8000/ready || true)
+            echo "$status"
+            case "$status" in *error*) exit 0 ;; esac
+            sleep 1
+          done
+          docker logs asr
+          exit 1

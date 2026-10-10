@@ -1,11 +1,11 @@
 """ASR inference backends.
 
-server.py owns the HTTP/WebSocket protocol; an engine owns model loading and
+asr_server.app owns the HTTP/WebSocket protocol; an engine owns model loading and
 inference. All engine methods are blocking and are called from worker threads.
 
 Select one with ASR_BACKEND:
-  vllm  - qwen-asr + vLLM on an NVIDIA GPU (engines/vllm_engine.py)
-  onnx  - ONNX Runtime on CPU (engines/onnx_engine.py)
+  vllm  - qwen-asr + vLLM on an NVIDIA GPU (vllm_engine.py)
+  onnx  - ONNX Runtime on CPU or CUDA (onnx_engine.py)
 """
 
 from typing import List, Optional, Sequence, Tuple

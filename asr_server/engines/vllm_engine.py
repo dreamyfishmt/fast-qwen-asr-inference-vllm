@@ -1,25 +1,36 @@
 """qwen-asr + vLLM backend (NVIDIA GPU)."""
 
 import logging
-import os
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from ..config import env
 from . import Audio, Engine, Stream
 
 logger = logging.getLogger(__name__)
 
 
-def _env_bool(key: str, default: str) -> bool:
-    return os.getenv(key, default).lower() in ("true", "1", "yes", "on")
+GROUP = "vLLM backend"
 
+ENABLE_ASR_MODEL = env("ENABLE_ASR_MODEL", True, "Load the ASR model", group=GROUP)
+ASR_MODEL_NAME = env("ASR_MODEL_NAME", "Qwen/Qwen3-ASR-1.7B", "ASR model path (or Hugging Face id)", group=GROUP)
+GPU_MEMORY_UTILIZATION = env("GPU_MEMORY_UTILIZATION", 0.75, "Fraction of GPU memory vLLM may reserve", group=GROUP)
+MAX_NEW_TOKENS = env("MAX_NEW_TOKENS", 4096, "Most tokens generated per transcription", group=GROUP)
+VLLM_QUANTIZATION = env(
+    "VLLM_QUANTIZATION", "", "vLLM quantization method, e.g. `modelopt` for ModelOpt FP8 checkpoints (empty = from the checkpoint config)",
+    group=GROUP,
+)
+ENABLE_ALIGNER_MODEL = env("ENABLE_ALIGNER_MODEL", True, "Load the forced aligner (timestamps)", group=GROUP)
+ALIGNER_MODEL_NAME = env("ALIGNER_MODEL_NAME", "Qwen/Qwen3-ForcedAligner-0.6B", "Forced aligner path (or Hugging Face id)", group=GROUP)
 
 # Streaming decoder params (qwen_asr init_streaming_state).
 # Smaller chunk size -> partial text updates more often, at the cost of more GPU calls.
-STREAM_CHUNK_SIZE_SEC = float(os.getenv("STREAM_CHUNK_SIZE_SEC", "2.0"))
-STREAM_UNFIXED_CHUNK_NUM = int(os.getenv("STREAM_UNFIXED_CHUNK_NUM", "2"))
-STREAM_UNFIXED_TOKEN_NUM = int(os.getenv("STREAM_UNFIXED_TOKEN_NUM", "5"))
+STREAM_CHUNK_SIZE_SEC = env(
+    "STREAM_CHUNK_SIZE_SEC", 2.0, "Audio seconds per streaming decode step (smaller = faster partials, more GPU work)", group=GROUP,
+)
+STREAM_UNFIXED_CHUNK_NUM = env("STREAM_UNFIXED_CHUNK_NUM", 2, "First N chunks are decoded without a text prefix", group=GROUP)
+STREAM_UNFIXED_TOKEN_NUM = env("STREAM_UNFIXED_TOKEN_NUM", 5, "Trailing tokens rolled back (re-decoded) on each step", group=GROUP)
 
 
 class VllmStream(Stream):
@@ -58,33 +69,27 @@ class VllmEngine(Engine):
     def load(self) -> None:
         from qwen_asr import Qwen3ASRModel, Qwen3ForcedAligner
 
-        if _env_bool("ENABLE_ASR_MODEL", "true"):
-            model_name = os.getenv("ASR_MODEL_NAME", "Qwen/Qwen3-ASR-1.7B")
-            gpu_mem = float(os.getenv("GPU_MEMORY_UTILIZATION", "0.75"))
-            max_new_tokens = int(os.getenv("MAX_NEW_TOKENS", "4096"))
-            # vLLM quantization method, e.g. "modelopt" for ModelOpt FP8 checkpoints. Empty = from checkpoint config.
-            quantization = os.getenv("VLLM_QUANTIZATION", "").strip() or None
-            llm_kwargs = {"quantization": quantization} if quantization else {}
-            if quantization:
-                logger.info(f"Using vLLM quantization: {quantization}")
-            logger.info(f"Loading ASR Model: {model_name}...")
+        if ENABLE_ASR_MODEL:
+            llm_kwargs = {"quantization": VLLM_QUANTIZATION} if VLLM_QUANTIZATION else {}
+            if VLLM_QUANTIZATION:
+                logger.info(f"Using vLLM quantization: {VLLM_QUANTIZATION}")
+            logger.info(f"Loading ASR Model: {ASR_MODEL_NAME}...")
             self.asr = Qwen3ASRModel.LLM(
-                model=model_name,
-                gpu_memory_utilization=gpu_mem,
-                max_new_tokens=max_new_tokens,
+                model=ASR_MODEL_NAME,
+                gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
+                max_new_tokens=MAX_NEW_TOKENS,
                 **llm_kwargs,
             )
             logger.info("ASR Model loaded successfully.")
         else:
             logger.info("ASR Model disabled via ENABLE_ASR_MODEL.")
 
-        if _env_bool("ENABLE_ALIGNER_MODEL", "true"):
+        if ENABLE_ALIGNER_MODEL:
             import torch
 
-            aligner_name = os.getenv("ALIGNER_MODEL_NAME", "Qwen/Qwen3-ForcedAligner-0.6B")
-            logger.info(f"Loading Aligner Model: {aligner_name}...")
+            logger.info(f"Loading Aligner Model: {ALIGNER_MODEL_NAME}...")
             self.aligner = Qwen3ForcedAligner.from_pretrained(
-                aligner_name, dtype=torch.bfloat16, device_map="cuda:0"
+                ALIGNER_MODEL_NAME, dtype=torch.bfloat16, device_map="cuda:0"
             )
             logger.info("Aligner Model loaded successfully.")
         else:

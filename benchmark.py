@@ -1,11 +1,12 @@
-import asyncio
 import argparse
-import time
+import asyncio
 import re
 import statistics
 import sys
-from pathlib import Path
+import time
 from asyncio import create_subprocess_exec, subprocess
+from pathlib import Path
+
 
 class BenchmarkStats:
     def __init__(self):
@@ -23,21 +24,21 @@ class BenchmarkStats:
         try:
             rtf_match = re.search(r"Real-Time Factor \(RTF\): ([0-9.]+)", stdout)
             time_match = re.search(r"Processing Time: ([0-9.]+)s", stdout)
-            
+
             if rtf_match and time_match:
                 self.rtfs.append(float(rtf_match.group(1)))
                 self.latencies.append(float(time_match.group(1)))
                 self.success += 1
             else:
                 self.errors += 1
-        except:
+        except Exception:
             self.errors += 1
 
     def add_batch_result(self, duration, stdout, returncode):
         if returncode == 0:
             self.latencies.append(duration)
             self.success += 1
-            # We don't have RTF easily for batch without file duration knowledge here, 
+            # We don't have RTF easily for batch without file duration knowledge here,
             # unless we parse it or pass it in. For now, latency is the main metric.
         else:
             self.errors += 1
@@ -86,7 +87,7 @@ async def main():
     args = parser.parse_args()
 
     print(f"Starting Benchmark: {args.clients} clients, {args.requests} requests each.")
-    
+
     stats = BenchmarkStats()
     stats.start_time = time.time()
 
@@ -116,7 +117,7 @@ async def main():
 
     tasks = [worker() for _ in range(args.clients)]
     await asyncio.gather(*tasks)
-    
+
     stats.end_time = time.time()
     stats.report()
 
