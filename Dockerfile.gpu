@@ -11,8 +11,11 @@ ENV PYTHONUNBUFFERED=1 \
 # CUDA/cuDNN come as nvidia-* wheels (loaded by onnxruntime.preload_dlls()); the driver library
 # (libcuda) is injected from the host by the NVIDIA Container Toolkit. cuBLAS is not part of
 # onnxruntime-gpu's [cuda] extra, so it is listed explicitly.
+# onnxruntime-gpu is pinned: 1.31.0 fails on the first prompt of the GQA decoder with "GQA flash attention
+# workspace sizing failed: Flash total sequence length must be positive and fit int32" (its new workspace
+# check sees total_sequence_length as 0). Check the decoder on a GPU before raising the pin.
 RUN pip install \
-        "onnxruntime-gpu[cuda,cudnn]>=1.23" nvidia-cublas onnx "tokenizers>=0.20" numpy scipy \
+        "onnxruntime-gpu[cuda,cudnn]==1.30.0" nvidia-cublas onnx "tokenizers>=0.20" numpy scipy \
         fastapi "uvicorn>=0.30" websockets python-multipart soundfile psutil \
         opencc-python-reimplemented
 
