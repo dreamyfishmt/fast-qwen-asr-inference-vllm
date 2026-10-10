@@ -6,7 +6,7 @@ directory** mounted into the container (read-only, offline).
 
 | Image | Backend | Model | Hardware | Image size |
 |---|---|---|---|---|
-| **`…:latest-gpu` (recommended)** | ONNX Runtime + CUDA 13 | Qwen3-ASR-1.7B (int4) | NVIDIA GPU, driver R580+. See [Quick start: GPU](#quick-start-gpu-onnx-runtime) | ~3 GB |
+| **`…:latest-gpu` (recommended)** | ONNX Runtime + CUDA 13 | Qwen3-ASR-1.7B (int4 decoder, FP16 encoder) | NVIDIA GPU, driver R580+. See [Quick start: GPU](#quick-start-gpu-onnx-runtime) | ~3 GB |
 | `…:latest-cpu` | ONNX Runtime | Qwen3-ASR-0.6B (int4) | Any x86-64 / ARM64 CPU, 2+ GB RAM. See [CPU deployment](#cpu-deployment) | ~0.5 GB |
 | built locally (`compose.yaml`) | vLLM + `qwen-asr` | Qwen3-ASR-1.7B (FP8) | NVIDIA GPU (RTX 30 series or newer). See [vLLM image (advanced)](#vllm-image-advanced) | ~14 GB |
 
@@ -31,7 +31,7 @@ server below, then set the connection in the tray menu → **ASR Server…**:
 
 ## Quick start: GPU (ONNX Runtime)
 
-Qwen3-ASR-1.7B (int4) on an NVIDIA GPU with ONNX Runtime's CUDA execution provider. The image (`…:latest-gpu`,
+Qwen3-ASR-1.7B (int4 decoder, FP16 encoder) on an NVIDIA GPU with ONNX Runtime's CUDA execution provider. The image (`…:latest-gpu`,
 ~3 GB installed) contains no PyTorch or vLLM.
 
 **Requirements**
@@ -59,8 +59,7 @@ curl -L -o .env https://raw.githubusercontent.com/dreamyfishmt/fast-qwen-asr-inf
 
 On Windows PowerShell, use `curl.exe` instead of `curl`. This already creates `.env`, so skip the `cp` in step 2.
 
-1. Download the model folder [`dreamyfishmt/qwen3-asr-1.7b-onnx`](https://huggingface.co/dreamyfishmt/qwen3-asr-1.7b-onnx)
-   (~3.5 GB):
+1. Download the model (~2.25 GB) from [`dreamyfishmt/qwen3-asr-1.7b-onnx`](https://huggingface.co/dreamyfishmt/qwen3-asr-1.7b-onnx):
 
    ```bash
    uvx --from huggingface_hub hf download dreamyfishmt/qwen3-asr-1.7b-onnx --local-dir /srv/models/qwen3-asr-1.7b-onnx
@@ -73,10 +72,11 @@ On Windows PowerShell, use `curl.exe` instead of `curl`. This already creates `.
    uvx --from huggingface_hub hf download dreamyfishmt/qwen3-asr-1.7b-onnx --local-dir D:/models/qwen3-asr-1.7b-onnx
    ```
 
-   Run the same command again to update the model, then restart the container. The int4 GroupQueryAttention decoder
-   comes from [`sorryhyun/qwen3-asr-onnx-gqa`](https://huggingface.co/sorryhyun/qwen3-asr-onnx-gqa) and the
-   tokenizer and embeddings from [`andrewleech/qwen3-asr-1.7b-onnx`](https://huggingface.co/andrewleech/qwen3-asr-1.7b-onnx);
-   see the [model card](https://huggingface.co/dreamyfishmt/qwen3-asr-1.7b-onnx) for the current files and their sources.
+   The repo repackages, unmodified, the embeddings and tokenizer of
+   [`andrewleech/qwen3-asr-1.7b-onnx`](https://huggingface.co/andrewleech/qwen3-asr-1.7b-onnx) and the int4
+   GroupQueryAttention decoder with fp16 I/O from [`sorryhyun/qwen3-asr-onnx-gqa`](https://huggingface.co/sorryhyun/qwen3-asr-onnx-gqa).
+   The encoder `encoder.fp16.onnx` is an FP16 conversion of andrewleech's FP32 `encoder.onnx`; see the
+   [model card](https://huggingface.co/dreamyfishmt/qwen3-asr-1.7b-onnx) for source revisions and validation.
 
    If the download fails with a 401 from `cas-server.xethub.hf.co` (some proxies block Hugging Face's Xet storage),
    set `HF_HUB_DISABLE_XET=1` and run it again (the script does this automatically).
@@ -113,7 +113,7 @@ Build locally instead of pulling: `docker compose -f compose.gpu.yaml -f compose
 | `ASR_MODEL_DIR` | `qwen3-asr-1.7b-onnx` | Model folder inside `MODEL_DIR` |
 | `ONNX_PROVIDER` | `cuda` (image default) | `cuda` or `cpu` |
 | `ONNX_DEVICE_ID` | `0` | GPU index |
-| `ONNX_DECODER` / `ONNX_ENCODER` | auto | Decoder / encoder file in the model folder; auto prefers `decoder-*fp16*` on the GPU and `decoder-*fp32*` on the CPU; for the encoder, `encoder.fp16.onnx` (GPU only), then `encoder.int4.onnx`, then `encoder.onnx` |
+| `ONNX_DECODER` / `ONNX_ENCODER` | auto | Decoder / encoder file in the model folder; auto prefers `decoder-*fp16*` on the GPU and `decoder-*fp32*` on the CPU, and `encoder.int4.onnx`, then `encoder.fp16.onnx` on the GPU and `encoder.onnx` on the CPU |
 | `STREAM_PARTIAL_INTERVAL_SEC` / `STREAM_PARTIAL_MAX_SEC` | `1.0` / `60` | Partial cadence and cutoff |
 | `STREAM_FINAL_REUSE_PARTIAL` | `false` | Continue the final result from the last partial (see [CPU deployment](#cpu-deployment)) |
 | `API_TOKEN` | — | Optional shared secret; see [Authentication](#authentication) |

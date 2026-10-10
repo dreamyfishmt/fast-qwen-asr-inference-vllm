@@ -78,7 +78,7 @@ ENCODER_SEGMENT_WINDOWS = int(os.getenv("ONNX_ENCODER_SEGMENT_WINDOWS", "1"))
 MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "1024"))
 # Decoder graph file in the model dir (empty = auto-detect: gqa, then merged, then split)
 ONNX_DECODER = os.getenv("ONNX_DECODER", "").strip()
-# Encoder graph file (empty = auto: encoder.fp16.onnx on the GPU, then encoder.int4.onnx, then encoder.onnx)
+# Encoder graph file (empty = encoder.int4.onnx, else encoder.fp16.onnx on the GPU / encoder.onnx on the CPU)
 ONNX_ENCODER = os.getenv("ONNX_ENCODER", "").strip()
 # Execution provider: cpu, or cuda (onnxruntime-gpu; falls back to CPU if CUDA can't be loaded)
 ONNX_PROVIDER = os.getenv("ONNX_PROVIDER", "cpu").strip().lower()
@@ -487,16 +487,22 @@ class OnnxEngine(Engine):
                     logger.warning(f"Could not patch {name} for last-position logits ({e}); using it unchanged")
             return ort.InferenceSession(str(path), sess_options=opts, providers=providers)
 
-        encoder = ONNX_ENCODER
-        if not encoder:
-            # fp16 weights halve the encoder size; on the CPU they run slower than fp32
-            candidates = (["encoder.fp16.onnx"] if device else []) + ["encoder.int4.onnx", "encoder.onnx"]
-            encoder = next((c for c in candidates if (d / c).is_file()), "encoder.onnx")
+        def pick_encoder(gpu: bool) -> str:
+            if ONNX_ENCODER:
+                return ONNX_ENCODER
+            # fp16 suits the GPU; on the CPU it is several times slower than fp32
+            order = ["encoder.fp16.onnx", "encoder.onnx"] if gpu else ["encoder.onnx", "encoder.fp16.onnx"]
+            return next((n for n in ["encoder.int4.onnx", *order] if (d / n).is_file()), "encoder.onnx")
+
+        encoder = pick_encoder(bool(device))
         self._encoder = session(encoder)
         if device and "CUDAExecutionProvider" not in self._encoder.get_providers():
             logger.warning("CUDA could not be initialized for ONNX Runtime; running on CPU")
             device = None
             providers[:] = ["CPUExecutionProvider"]  # don't retry CUDA for the decoder
+            if pick_encoder(False) != encoder:
+                encoder = pick_encoder(False)
+                self._encoder = session(encoder)
         self._encoder_inputs = [i.name for i in self._encoder.get_inputs()]
         self._encoder_dtype = np.float16 if self._encoder.get_inputs()[0].type == "tensor(float16)" else np.float32
         self.provider = "cuda" if device else "cpu"

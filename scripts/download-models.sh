@@ -4,8 +4,10 @@
 #   scripts/download-models.sh 0.6b /srv/models   # -> /srv/models/qwen3-asr-0.6b-onnx
 #   scripts/download-models.sh 1.7b /srv/models   # -> /srv/models/qwen3-asr-1.7b-onnx
 #
-# 0.6b files come from their original Hugging Face repos, pinned to the revisions the server was tested with.
-# 1.7b is the latest revision of dreamyfishmt/qwen3-asr-1.7b-onnx (the whole repo, a ready-to-use model folder).
+# 0.6b files come from their original Hugging Face repos; 1.7b comes from dreamyfishmt/qwen3-asr-1.7b-onnx
+# (files of andrewleech/qwen3-asr-1.7b-onnx and sorryhyun/qwen3-asr-onnx-gqa plus an FP16 encoder derived from
+# andrewleech's FP32 one). The third-party 0.6b repos are pinned to the revisions the server was tested with;
+# 1.7b follows the latest revision of our own repo and downloads all of it.
 # Uses `hf` if installed, otherwise `uvx --from huggingface_hub hf`.
 set -euo pipefail
 
@@ -14,10 +16,10 @@ usage() { echo "usage: $0 {0.6b|1.7b} MODEL_DIR" >&2; exit 2; }
 size=$1
 root=$2
 
-# Third-party repos: pinned to the revisions the server was tested with
+# Third-party repos: revisions the server was tested with
 RHASSPY_0_6B=rhasspy/qwen3-asr-0.6b-onnx-int4-merged@9ea8c26bbf497ef74a84ce19202ce62246af8ab4
 SORRYHYUN_GQA=sorryhyun/qwen3-asr-onnx-gqa@075249f70b56cdded1cf4b189cbdde0fb77aeec1
-# Our own repo: follows its latest revision
+# Our own repo: latest revision
 QWEN3_ASR_1_7B=dreamyfishmt/qwen3-asr-1.7b-onnx@main
 
 if command -v hf >/dev/null 2>&1; then
@@ -29,7 +31,7 @@ else
     exit 1
 fi
 
-# fetch REPO@REVISION DEST [FILE...]  (no files = the whole repo)
+# fetch REPO@REVISION DEST [FILE... | OPTIONS]  (no files = the whole repo)
 fetch() {
     local spec=$1 dest=$2
     shift 2
