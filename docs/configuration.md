@@ -42,7 +42,7 @@ server's own, before any compose file overrides them.
 | `EXIT_ON_LOAD_FAILURE` | `true` | Stop the server when the model fails to load, so the container restart policy retries |
 | `FFMPEG_TIMEOUT_SEC` | `60.0` | Time limit for decoding one upload with ffmpeg |
 | `MAX_CONCURRENT_DECODE` | `4` | Audio files decoded in parallel |
-| `MAX_CONCURRENT_INFER` | `1` | Inference calls run in parallel (GPU: usually 1) |
+| `MAX_CONCURRENT_INFER` | `1` | Inference calls run in parallel (GPU: usually 1); streams go before queued uploads |
 | `MAX_FILES` | `16` | Most files accepted in one `POST /transcribe` request |
 | `MAX_UPLOAD_MB` | `100.0` | Largest accepted request body for the upload endpoints (0 = unlimited) |
 | `THREADPOOL_WORKERS` | `0` | Worker threads for blocking calls (0 = 5 × CPU cores) |
@@ -56,7 +56,7 @@ server's own, before any compose file overrides them.
 | `STREAM_EXPECT_SR` | `16000` | Sample rate assumed when `start` has no `sample_rate_hz` |
 | `STREAM_IDLE_TIMEOUT_SEC` | `30.0` | Close a stream that sends nothing for this long (0 = never) |
 | `STREAM_MAX_SEC` | `300.0` | Audio beyond this many seconds per utterance is dropped (0 = unlimited) |
-| `STREAM_MIN_SAMPLES` | `1600` | Samples (16 kHz) buffered before they are fed to the stream (1600 = 100 ms) |
+| `STREAM_MIN_SAMPLES` | `1600` | Samples (16 kHz) buffered before they are fed to the stream (1600 = 100 ms; vLLM: at least one chunk) |
 
 ### Languages
 
@@ -76,13 +76,14 @@ server's own, before any compose file overrides them.
 | Variable | Default | Description |
 |---|---|---|
 | `ASR_MODEL_NAME` | `/models/qwen3-asr-0.6b-onnx` | Model directory |
-| `MAX_NEW_TOKENS` | `1024` | Most tokens generated per transcription |
+| `MAX_NEW_TOKENS` | `1024` | Most tokens generated per transcription (per segment, see `ONNX_SEGMENT_SEC`) |
 | `ONNX_DECODER` | — | Decoder graph file in the model directory (empty = auto-detect: gqa, then merged, then split) |
 | `ONNX_DEVICE_ID` | `0` | GPU index for `ONNX_PROVIDER=cuda` |
 | `ONNX_ENCODER` | — | Encoder graph file (empty = `encoder.int4.onnx`, else `encoder.fp16.onnx` on the GPU / `encoder.onnx` on the CPU) |
 | `ONNX_ENCODER_SEGMENT_WINDOWS` | `1` | Encoder segment length in 8 s windows (0 = whole utterance in one pass) |
 | `ONNX_MEM_ARENA` | `false` | Use ONNX Runtime's CPU memory arena (faster, higher RSS) |
 | `ONNX_PROVIDER` | `cpu` | Execution provider: `cpu`, or `cuda` (onnxruntime-gpu; falls back to CPU if CUDA can't be loaded) |
+| `ONNX_SEGMENT_SEC` | `30.0` | Longer audio is transcribed in segments of at most this many seconds, cut at pauses (0 = in one piece) |
 | `ONNX_THREADS` | `0` | ONNX Runtime intra-op threads (0 = all cores) |
 | `STREAM_FINAL_REUSE_PARTIAL` | `true` | The final result also continues from the last partial (faster on CPU; an early partial's error can survive) |
 | `STREAM_PARTIALS` | `true` | Send live partial results |

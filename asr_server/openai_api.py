@@ -11,7 +11,7 @@ from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from .config import env
-from .language import map_language
+from .language import join_text, map_language
 from .service import Service, ServiceError
 
 logger = logging.getLogger(__name__)
@@ -125,20 +125,6 @@ def _words(alignment) -> List[dict]:
     return words
 
 
-def _is_cjk(ch: str) -> bool:
-    cp = ord(ch)
-    return 0x3040 <= cp <= 0x30FF or 0x3400 <= cp <= 0x9FFF or 0xAC00 <= cp <= 0xD7AF or 0xF900 <= cp <= 0xFAFF
-
-
-def _join(tokens: List[str]) -> str:
-    out = ""
-    for tok in tokens:
-        if out and tok and not (_is_cjk(out[-1]) or _is_cjk(tok[0])):
-            out += " "
-        out += tok
-    return out
-
-
 def _segments(words: List[dict], text: str, duration: float) -> List[dict]:
     """Group aligned words into segments; without word timings, one segment spans the whole file."""
     if not words:
@@ -151,7 +137,7 @@ def _segments(words: List[dict], text: str, duration: float) -> List[dict]:
         current.append(w)
     if current:
         segments.append(current)
-    return [{"start": s[0]["start"], "end": s[-1]["end"], "text": _join([w["word"] for w in s])} for s in segments]
+    return [{"start": s[0]["start"], "end": s[-1]["end"], "text": join_text(w["word"] for w in s)} for s in segments]
 
 
 def _timestamp(sec: float, sep: str) -> str:

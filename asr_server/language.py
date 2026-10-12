@@ -1,6 +1,6 @@
 """Language codes -> Qwen3-ASR language names, and Traditional Chinese output via OpenCC."""
 
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Iterable, Optional, Tuple
 
 from .config import OPENCC_HK_CONFIG, OPENCC_TW_CONFIG
 
@@ -64,3 +64,18 @@ def get_converter(config: Optional[str]) -> Callable[[str], str]:
         import opencc
         _opencc_converters[config] = opencc.OpenCC(config).convert
     return _opencc_converters[config]
+
+
+def is_cjk(ch: str) -> bool:
+    cp = ord(ch)
+    return 0x3040 <= cp <= 0x30FF or 0x3400 <= cp <= 0x9FFF or 0xAC00 <= cp <= 0xD7AF or 0xF900 <= cp <= 0xFAFF
+
+
+def join_text(parts: Iterable[str]) -> str:
+    """Join pieces of a transcript: with a space, except next to CJK characters."""
+    out = ""
+    for part in parts:
+        if out and part and not (is_cjk(out[-1]) or is_cjk(part[0])):
+            out += " "
+        out += part
+    return out

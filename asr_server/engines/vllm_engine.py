@@ -5,6 +5,7 @@ from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from .. import config
 from ..config import env
 from . import Audio, Engine, Stream
 
@@ -47,8 +48,20 @@ class VllmStream(Stream):
         return self._state.language
 
     def feed(self, pcm: np.ndarray, partial: bool = True) -> bool:
-        # streaming_transcribe() buffers internally and decodes once per full chunk
-        self._model.streaming_transcribe(pcm, self._state)
+        # streaming_transcribe() buffers internally and decodes once per full chunk, re-feeding all
+        # audio so far each time. When several chunks are pending (the server fell behind), decode
+        # them in one step: the result covers the same audio, for the cost of a single chunk.
+        state = self._state
+        chunk = state.chunk_size_samples
+        full = (state.buffer.shape[0] + pcm.shape[0]) // chunk
+        if full <= 1:
+            self._model.streaming_transcribe(pcm, state)
+            return full == 1
+        state.chunk_size_samples = full * chunk
+        try:
+            self._model.streaming_transcribe(pcm, state)
+        finally:
+            state.chunk_size_samples = chunk
         return True
 
     def finish(self) -> None:
@@ -131,6 +144,10 @@ class VllmEngine(Engine):
             chunk_size_sec=STREAM_CHUNK_SIZE_SEC,
         )
         return VllmStream(self.asr, state)
+
+    def stream_feed_samples(self) -> int:
+        # streaming_transcribe() only decodes full chunks; feeding less just takes an inference slot
+        return max(config.STREAM_MIN_SAMPLES, int(round(STREAM_CHUNK_SIZE_SEC * 16000)))
 
     def memory_info(self) -> dict:
         try:

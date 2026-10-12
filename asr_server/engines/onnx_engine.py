@@ -32,8 +32,9 @@ from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from ..audio import resample
+from ..audio import resample, split_on_silence
 from ..config import env
+from ..language import join_text
 from . import Audio, Engine, Stream
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,9 @@ MASK_BLOCKED = np.finfo(np.float32).min
 # encoder can run on 8 s segments without changing the result while bounding memory.
 ENCODER_WINDOW_FRAMES = 800
 
+# Long audio is cut at the quietest point within this many seconds before ONNX_SEGMENT_SEC
+SEGMENT_SEARCH_SEC = 8.0
+
 
 GROUP = "ONNX backend"
 
@@ -77,7 +81,11 @@ ONNX_MEM_ARENA = env("ONNX_MEM_ARENA", False, "Use ONNX Runtime's CPU memory are
 ENCODER_SEGMENT_WINDOWS = env(
     "ONNX_ENCODER_SEGMENT_WINDOWS", 1, "Encoder segment length in 8 s windows (0 = whole utterance in one pass)", group=GROUP,
 )
-MAX_NEW_TOKENS = env("MAX_NEW_TOKENS", 1024, "Most tokens generated per transcription", group=GROUP)
+MAX_NEW_TOKENS = env("MAX_NEW_TOKENS", 1024, "Most tokens generated per transcription (per segment, see `ONNX_SEGMENT_SEC`)", group=GROUP)
+SEGMENT_SEC = env(
+    "ONNX_SEGMENT_SEC", 30.0,
+    "Longer audio is transcribed in segments of at most this many seconds, cut at pauses (0 = in one piece)", group=GROUP,
+)
 ONNX_DECODER = env(
     "ONNX_DECODER", "", "Decoder graph file in the model directory (empty = auto-detect: gqa, then merged, then split)", group=GROUP,
 )
@@ -271,6 +279,7 @@ class OnnxStream(Stream):
         self._version = 0
         self._reported = 0
         self._partial_tokens: List[int] = []
+        self._partial_samples = 0  # audio length the latest partial covers
         self._partials_done = 0
         self.text = ""
         self.language = language or ""
@@ -306,6 +315,7 @@ class OnnxStream(Stream):
             if not self._cancel.is_set():
                 self.text, self.language = text, language
                 self._partial_tokens = [t for t in tokens if t not in EOS_IDS]
+                self._partial_samples = audio.shape[0]
                 self._partials_done += 1
                 self._version += 1
 
@@ -331,9 +341,9 @@ class OnnxStream(Stream):
             self._worker.join()
         if self._n:
             prefix = self._prefix() if STREAM_FINAL_REUSE_PARTIAL else []
-            with self._engine.infer_lock:
-                tokens = self._engine.transcribe_tokens(self._audio(), self._language, self._context, prefix=prefix)
-            self.text, self.language = self._engine.parse(tokens, self._language)
+            self.text, self.language = self._engine.transcribe_long(
+                self._audio(), self._language, self._context, prefix, self._partial_samples
+            )
         self._parts = []
 
 
@@ -456,6 +466,7 @@ class _SplitDecoder:
 
 class OnnxEngine(Engine):
     name = "onnx"
+    exclusive = False  # infer_lock serializes inference; streams don't wait behind uploads in the service
 
     provider = ONNX_PROVIDER
 
@@ -693,6 +704,32 @@ class OnnxEngine(Engine):
         text = self._tokenizer.decode([t for t in tokens if t not in EOS_IDS], skip_special_tokens=True).strip()
         return text, detected
 
+    def transcribe_long(
+        self, audio: np.ndarray, language: Optional[str], context: str, prefix: Sequence[int] = (), prefix_samples: int = 0
+    ) -> Tuple[str, str]:
+        """Transcribe 16 kHz float32 audio of any length, in segments of at most ONNX_SEGMENT_SEC.
+
+        Each segment is transcribed on its own (the token budget and the decoder's cost grow with the
+        length), and infer_lock is taken per segment, so other work can run in between. `prefix` (tokens
+        of a transcription of the first `prefix_samples` samples) continues the first segment if it covers them.
+        """
+        segments = split_on_silence(audio, int(SEGMENT_SEC * RATE), int(SEGMENT_SEARCH_SEC * RATE))
+        texts, languages = [], []
+        for i, segment in enumerate(segments):
+            p = prefix if i == 0 and segment.shape[0] >= prefix_samples else ()
+            with self.infer_lock:
+                tokens = self.transcribe_tokens(segment, language, context, prefix=p)
+            text, detected = self.parse(tokens, language)
+            if text:
+                texts.append(text)
+                languages.append(detected)
+        if len(segments) > 1:
+            logger.info(f"Transcribed {audio.shape[0] / RATE:.1f}s of audio in {len(segments)} segments")
+        if not languages:
+            return "", language or ""
+        # with auto-detection, the language detected in most segments
+        return join_text(texts), max(languages, key=languages.count)
+
     def transcribe_one(
         self, audio: np.ndarray, language: Optional[str], context: str, cancel: Optional[threading.Event] = None
     ) -> Tuple[str, str]:
@@ -708,8 +745,7 @@ class OnnxEngine(Engine):
         for wav, sr in audios:
             if wav.ndim > 1:
                 wav = wav.mean(axis=1)
-            with self.infer_lock:
-                out.append(self.transcribe_one(resample(wav.astype(np.float32, copy=False), sr, RATE), language, context))
+            out.append(self.transcribe_long(resample(wav.astype(np.float32, copy=False), sr, RATE), language, context))
         return out
 
     def new_stream(self, language: Optional[str], context: str = "") -> Stream:
@@ -724,6 +760,7 @@ class OnnxEngine(Engine):
             "final_reuse_partial": STREAM_FINAL_REUSE_PARTIAL,
             "unfixed_chunk_num": STREAM_UNFIXED_CHUNK_NUM,
             "unfixed_token_num": STREAM_UNFIXED_TOKEN_NUM,
+            "segment_sec": SEGMENT_SEC,
             "onnx_threads": ONNX_THREADS,
             "provider": getattr(self, "provider", ONNX_PROVIDER),
         }
