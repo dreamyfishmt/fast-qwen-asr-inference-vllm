@@ -78,3 +78,26 @@ def test_stream_resampler_passthrough():
     x = np.ones(10, dtype=np.float32)
     rs = StreamResampler(16000)
     assert rs.process(x) is x and rs.flush().size == 0
+
+
+def test_split_on_silence_cuts_at_pauses():
+    from asr_server.audio import split_on_silence
+
+    rng = np.random.default_rng(0)
+    audio = (0.3 * rng.standard_normal(16000 * 70)).astype(np.float32)
+    audio[16000 * 25 : 16000 * 25 + 4000] = 0  # pause at 25 s
+    audio[16000 * 52 : 16000 * 52 + 4000] = 0  # pause at 52 s
+    pieces = split_on_silence(audio, 16000 * 30, 16000 * 8)
+    assert len(pieces) == 3
+    assert all(p.shape[0] <= 16000 * 30 for p in pieces)
+    np.testing.assert_array_equal(np.concatenate(pieces), audio)
+    cuts = np.cumsum([p.shape[0] for p in pieces])[:-1] / 16000
+    assert 25 <= cuts[0] <= 25.25 and 52 <= cuts[1] <= 52.25
+
+
+def test_split_on_silence_short_or_disabled():
+    from asr_server.audio import split_on_silence
+
+    audio = np.ones(16000 * 10, dtype=np.float32)
+    assert len(split_on_silence(audio, 16000 * 30, 16000 * 8)) == 1
+    assert len(split_on_silence(np.ones(16000 * 100, dtype=np.float32), 0, 16000 * 8)) == 1

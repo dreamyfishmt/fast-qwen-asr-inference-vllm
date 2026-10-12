@@ -63,7 +63,7 @@ API_TOKEN = env(
 CORS_ORIGINS = env("CORS_ORIGINS", "*", "Comma-separated origins allowed by CORS (`*` = any)")
 
 MAX_CONCURRENT_DECODE = env("MAX_CONCURRENT_DECODE", 4, "Audio files decoded in parallel", group="Limits")
-MAX_CONCURRENT_INFER = env("MAX_CONCURRENT_INFER", 1, "Inference calls run in parallel (GPU: usually 1)", group="Limits")
+MAX_CONCURRENT_INFER = env("MAX_CONCURRENT_INFER", 1, "Inference calls run in parallel (GPU: usually 1); streams go before queued uploads", group="Limits")
 THREADPOOL_WORKERS = env(
     "THREADPOOL_WORKERS", 0, "Worker threads for blocking calls (0 = 5 × CPU cores)", group="Limits",
 ) or _cpu_count() * 5
@@ -76,7 +76,7 @@ EXIT_ON_LOAD_FAILURE = env(
 )
 
 STREAM_MIN_SAMPLES = env(
-    "STREAM_MIN_SAMPLES", 1600, "Samples (16 kHz) buffered before they are fed to the stream (1600 = 100 ms)", group="Streaming",
+    "STREAM_MIN_SAMPLES", 1600, "Samples (16 kHz) buffered before they are fed to the stream (1600 = 100 ms; vLLM: at least one chunk)", group="Streaming",
 )
 PARTIAL_INTERVAL_MS = env("PARTIAL_INTERVAL_MS", 120, "Minimum interval between `partial` messages", group="Streaming")
 STREAM_EXPECT_SR = env(

@@ -1,9 +1,12 @@
 """Shared server state: the engine, its loading status and the concurrency limits."""
 
 import asyncio
+import heapq
+import itertools
 import logging
 import os
 import signal
+from contextlib import asynccontextmanager
 from typing import List, Optional, Sequence
 
 from . import config
@@ -23,20 +26,85 @@ class ServiceError(Exception):
         self.message = message
 
 
+class PrioritySemaphore:
+    """A semaphore whose waiters are served by priority (lower first), then in arrival order."""
+
+    def __init__(self, value: int):
+        self._free = max(1, value)
+        self._waiters: list = []  # heap of (priority, seq, future)
+        self._seq = itertools.count()
+
+    @asynccontextmanager
+    async def slot(self, priority: int):
+        if self._free > 0 and not self._waiters:
+            self._free -= 1
+        else:
+            fut = asyncio.get_running_loop().create_future()
+            heapq.heappush(self._waiters, (priority, next(self._seq), fut))
+            try:
+                await fut
+            except asyncio.CancelledError:
+                if fut.done() and not fut.cancelled():
+                    self._release()  # the slot was handed over just as we were cancelled
+                raise
+        try:
+            yield
+        finally:
+            self._release()
+
+    def _release(self) -> None:
+        while self._waiters:
+            _, _, fut = heapq.heappop(self._waiters)
+            if not fut.done():
+                fut.set_result(None)  # hand the slot over directly
+                return
+        self._free += 1
+
+
+async def _in_thread(fn, *args):
+    """asyncio.to_thread(), except that when cancelled it still waits for the call to return.
+
+    A thread can't be interrupted: without this, a cancelled caller would leave its inference slot
+    while the engine is still running, and the next call could overlap it.
+    """
+    task = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await asyncio.wait({task})
+        raise
+
+
+# Priorities for PrioritySemaphore: streams are latency-sensitive, uploads wait behind them
+STREAM, BATCH = 0, 1
+
+
 class Service:
     def __init__(self, engine: Engine):
         self.engine = engine
         self.status = "starting"
         self.ready_event = asyncio.Event()
         self.decode_sem = asyncio.Semaphore(config.MAX_CONCURRENT_DECODE)
-        self.infer_sem = asyncio.Semaphore(config.MAX_CONCURRENT_INFER)
+        self.infer_sem = PrioritySemaphore(config.MAX_CONCURRENT_INFER)
         self.active_streams = 0
         self.exit_code = 0  # set when the server stops itself after a failed load
 
     async def run_infer(self, fn, *args):
-        """Run a blocking engine call on a worker thread, within the inference limit."""
-        async with self.infer_sem:
-            return await asyncio.to_thread(fn, *args)
+        """Run a blocking engine call (batch work) on a worker thread, within the inference limit."""
+        async with self.infer_sem.slot(BATCH):
+            return await _in_thread(fn, *args)
+
+    async def run_stream(self, fn, *args):
+        """Run a blocking streaming call on a worker thread.
+
+        Engines whose calls must not overlap (`exclusive`, e.g. vLLM) share the inference limit with
+        uploads but go first; other engines (ONNX) synchronize internally and are called directly, so a
+        long upload doesn't hold up the streams.
+        """
+        if not self.engine.exclusive:
+            return await _in_thread(fn, *args)
+        async with self.infer_sem.slot(STREAM):
+            return await _in_thread(fn, *args)
 
     # ---- loading ----
 

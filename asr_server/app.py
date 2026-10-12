@@ -227,41 +227,13 @@ async def _run_stream(ws: WebSocket, service: Service, language: Optional[str]) 
     except Exception:
         return
 
-    stream = None
     pcm = PcmS16Decoder()
     resampler: Optional[StreamResampler] = None
-    buf_parts: List[np.ndarray] = []
-    buf_n = 0
+    pending = _AudioBuffer()  # resampled audio not yet fed to the stream
     total_samples = 0  # at the client's sample rate
     max_samples = 0
-    last_partial_ts = 0.0
-    last_partial_text = ""
+    infer: Optional[asyncio.Task] = None
     idle_timeout = config.STREAM_IDLE_TIMEOUT_SEC if config.STREAM_IDLE_TIMEOUT_SEC > 0 else None
-
-    def buffer(audio: np.ndarray) -> None:
-        nonlocal buf_n
-        if audio.size:
-            buf_parts.append(audio)
-            buf_n += audio.size
-
-    async def flush_and_infer(send_partial: bool):
-        nonlocal buf_parts, buf_n, last_partial_ts, last_partial_text
-        if buf_n <= 0:
-            return
-        chunk = np.concatenate(buf_parts, axis=0) if len(buf_parts) > 1 else buf_parts[0]
-        # streams buffer/accumulate internally: feed only new samples
-        buf_parts = []
-        buf_n = 0
-
-        updated = await service.run_infer(stream.feed, chunk, send_partial)
-
-        if send_partial and updated:
-            now = asyncio.get_running_loop().time()
-            text = convert(stream.text)
-            if text != last_partial_text and (now - last_partial_ts) * 1000.0 >= config.PARTIAL_INTERVAL_MS:
-                last_partial_ts = now
-                last_partial_text = text
-                await ws.send_json({"type": "partial", "text": text, "language": stream.language})
 
     try:
         while True:
@@ -275,6 +247,8 @@ async def _run_stream(ws: WebSocket, service: Service, language: Optional[str]) 
                 break
             if msg["type"] != "websocket.receive":
                 continue
+            if infer is not None and infer.done():
+                return  # inference failed; it has closed the connection
 
             # Control messages
             if msg.get("text"):
@@ -287,7 +261,7 @@ async def _run_stream(ws: WebSocket, service: Service, language: Optional[str]) 
                 t = data.get("type")
 
                 if t == "start":
-                    if stream is not None:
+                    if infer is not None:
                         await _ws_error(ws, "start was already sent; one connection = one utterance", 1002)
                         return
                     client_sr = _parse_rate(data.get("sample_rate_hz"))
@@ -306,13 +280,14 @@ async def _run_stream(ws: WebSocket, service: Service, language: Optional[str]) 
                     if not isinstance(context, str):
                         context = ""
                     try:
-                        stream = await service.run_infer(service.engine.new_stream, full_lang, context)
+                        stream = await service.run_stream(service.engine.new_stream, full_lang, context)
                     except Exception as e:
                         logger.exception(f"Failed to init stream: {e}")
                         await ws.close(code=1011, reason="stream init failed")
                         return
                     resampler = StreamResampler(client_sr, MODEL_RATE)
                     max_samples = int(config.STREAM_MAX_SEC * client_sr) if config.STREAM_MAX_SEC > 0 else 0
+                    infer = asyncio.create_task(_infer_loop(ws, service, stream, pending, convert))
 
                     # Optional: acknowledge language selection
                     if full_lang is not None:
@@ -320,21 +295,19 @@ async def _run_stream(ws: WebSocket, service: Service, language: Optional[str]) 
                     continue
 
                 if t == "stop":
-                    if stream is None:
+                    if infer is None:
                         await _ws_error(ws, "stop before start", 1002)
                         return
-                    # Flush remainder, finish, send final
-                    buffer(resampler.flush())
-                    await flush_and_infer(send_partial=False)
-                    await service.run_infer(stream.finish)
-                    await ws.send_json({"type": "final", "text": convert(stream.text), "language": stream.language})
-                    await ws.close(code=1000)
+                    # The inference task feeds the remainder, sends the final result and closes
+                    pending.add(resampler.flush())
+                    pending.close()
+                    await infer
                     return
                 continue
 
             # Audio frames
             if msg.get("bytes"):
-                if stream is None:
+                if infer is None:
                     # Require explicit start so we can validate format.
                     await _ws_error(ws, "Send {type:'start', format:'pcm_s16le', sample_rate_hz:16000} first", 1002)
                     return
@@ -351,14 +324,97 @@ async def _run_stream(ws: WebSocket, service: Service, language: Optional[str]) 
                         await ws.send_json({"type": "info", "message": f"max_duration_reached={config.STREAM_MAX_SEC:g}s"})
                 total_samples += audio.size
 
-                buffer(resampler.process(audio))
-                if buf_n >= config.STREAM_MIN_SAMPLES:
-                    await flush_and_infer(send_partial=True)
+                pending.add(resampler.process(audio))
 
     except WebSocketDisconnect:
         pass
     except Exception as e:
         logger.exception(f"WS Error: {e}")
+        try:
+            await ws.close(code=1011, reason="internal error")
+        except Exception:
+            pass
+    finally:
+        if infer is not None and not infer.done():
+            # The client went away (or the stream ended in error): stop feeding. Wait for the
+            # engine call in progress, so the stream still counts against MAX_STREAMS until then.
+            infer.cancel()
+            await asyncio.gather(infer, return_exceptions=True)
+
+
+class _AudioBuffer:
+    """Audio received but not yet fed to the stream. The receive loop adds to it while inference runs."""
+
+    def __init__(self):
+        self.parts: List[np.ndarray] = []
+        self.n = 0
+        self.closed = False  # `stop` received: nothing more will be added
+        self.changed = asyncio.Event()
+
+    def add(self, audio: np.ndarray) -> None:
+        if audio.size:
+            self.parts.append(audio)
+            self.n += audio.size
+            self.changed.set()
+
+    def close(self) -> None:
+        self.closed = True
+        self.changed.set()
+
+    def take(self) -> np.ndarray:
+        chunk = np.concatenate(self.parts) if len(self.parts) > 1 else self.parts[0] if self.parts else np.zeros(0, np.float32)
+        self.parts, self.n = [], 0
+        return chunk
+
+    async def wait(self, timeout: Optional[float]) -> None:
+        """Until something is added or the buffer is closed, at most `timeout` seconds."""
+        self.changed.clear()
+        try:
+            await asyncio.wait_for(self.changed.wait(), timeout)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def _infer_loop(ws: WebSocket, service: Service, stream, pending: _AudioBuffer, convert) -> None:
+    """Feeds buffered audio to the stream and sends partials; after `stop`, the final result.
+
+    Runs beside the receive loop, so audio keeps being read while the model works. Whatever
+    arrived during an inference call is fed in one piece by the next.
+    """
+    min_feed = service.engine.stream_feed_samples()
+    interval = config.PARTIAL_INTERVAL_MS / 1000.0
+    loop = asyncio.get_running_loop()
+    sent_text, sent_at = "", float("-inf")
+    unsent: Optional[str] = None  # a partial held back by PARTIAL_INTERVAL_MS, sent once it elapses
+
+    try:
+        while True:
+            if pending.closed:
+                if pending.n:
+                    await service.run_stream(stream.feed, pending.take(), False)
+                await service.run_stream(stream.finish)
+                await ws.send_json({"type": "final", "text": convert(stream.text), "language": stream.language})
+                await ws.close(code=1000)
+                return
+
+            if unsent is not None and loop.time() - sent_at >= interval:
+                sent_text, sent_at, unsent = unsent, loop.time(), None
+                await ws.send_json({"type": "partial", "text": sent_text, "language": stream.language})
+
+            if pending.n < min_feed:
+                await pending.wait(max(0.0, sent_at + interval - loop.time()) if unsent is not None else None)
+                continue
+
+            if await service.run_stream(stream.feed, pending.take(), True):
+                text = convert(stream.text)
+                if text != sent_text:
+                    unsent = text
+                elif unsent is not None:
+                    unsent = None  # back to what the client already has
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.exception(f"Stream inference failed: {e}")
         try:
             await ws.close(code=1011, reason="internal error")
         except Exception:

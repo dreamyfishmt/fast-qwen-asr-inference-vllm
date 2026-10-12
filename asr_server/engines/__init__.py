@@ -12,6 +12,8 @@ from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from .. import config
+
 # (waveform float32 mono, sample rate)
 Audio = Tuple[np.ndarray, int]
 
@@ -35,6 +37,9 @@ class Stream:
 class Engine:
     name = "base"
     supports_alignment = False
+    # True: calls must not overlap, so the service serializes them (MAX_CONCURRENT_INFER).
+    # False: the engine synchronizes internally; streaming calls bypass the service's limit.
+    exclusive = True
 
     def load(self) -> None:
         raise NotImplementedError
@@ -53,6 +58,10 @@ class Engine:
 
     def new_stream(self, language: Optional[str], context: str = "") -> Stream:
         raise NotImplementedError
+
+    def stream_feed_samples(self) -> int:
+        """Fewest buffered 16 kHz samples worth a Stream.feed() call (less is fed only at the end)."""
+        return config.STREAM_MIN_SAMPLES
 
     def streaming_config(self) -> dict:
         return {}

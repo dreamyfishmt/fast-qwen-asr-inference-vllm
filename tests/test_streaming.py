@@ -1,3 +1,5 @@
+import time
+
 import numpy as np
 import pytest
 from starlette.websockets import WebSocketDisconnect
@@ -112,3 +114,65 @@ def test_ws_auth(make_client):
             ws.receive_json()
     with c.websocket_connect("/transcribe-streaming?token=s3cret") as ws:
         assert ws.receive_json()["type"] == "ready"
+
+
+def test_audio_is_read_while_inference_runs(make_client):
+    from .conftest import FakeEngine, FakeStream
+
+    class Slow(FakeStream):
+        def feed(self, pcm, partial=True):
+            time.sleep(0.05)
+            return super().feed(pcm, partial)
+
+    class Engine(FakeEngine):
+        def new_stream(self, language, context=""):
+            self.streams.append(Slow())
+            return self.streams[-1]
+
+    c = make_client(Engine())
+    with c.websocket_connect("/transcribe-streaming") as ws:
+        msgs = run(ws, {"type": "start"}, [pcm(0.1)] * 30)
+    stream = c.engine.streams[0]
+    assert msgs[-1]["text"] == "final 48000 samples"
+    # audio that arrived during a feed() call was fed in one piece afterwards
+    assert len(stream.samples) < 30
+
+
+def test_feed_size_follows_the_engine(make_client):
+    from .conftest import FakeEngine
+
+    class Engine(FakeEngine):
+        def stream_feed_samples(self):
+            return 8000
+
+    c = make_client(Engine())
+    with c.websocket_connect("/transcribe-streaming") as ws:
+        msgs = run(ws, {"type": "start"}, [pcm(0.1)] * 13)
+    sizes = [s.size for s in c.engine.streams[0].samples]
+    assert msgs[-1]["text"] == "final 20800 samples"
+    assert all(n >= 8000 for n in sizes[:-1]) and sum(sizes) == 20800
+
+
+def test_throttled_partial_is_sent_later(make_client):
+    c = make_client(PARTIAL_INTERVAL_MS=300)
+    with c.websocket_connect("/transcribe-streaming") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_json({"type": "start"})
+        ws.send_bytes(pcm(0.1))
+        assert ws.receive_json() == {"type": "partial", "text": "1600 samples", "language": "English"}
+        sent = time.monotonic()
+        ws.send_bytes(pcm(0.1))  # within PARTIAL_INTERVAL_MS: held back, not dropped
+        assert ws.receive_json() == {"type": "partial", "text": "3200 samples", "language": "English"}
+        assert time.monotonic() - sent >= 0.2
+        ws.send_json({"type": "stop"})
+        assert ws.receive_json()["type"] == "final"
+
+
+def test_disconnect_mid_stream_releases_the_slot(make_client):
+    c = make_client(MAX_STREAMS=1)
+    with c.websocket_connect("/transcribe-streaming") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_json({"type": "start"})
+        ws.send_bytes(pcm(0.5))
+    with c.websocket_connect("/transcribe-streaming") as ws:
+        assert run(ws, {"type": "start"}, [pcm(0.1)])[-1]["type"] == "final"

@@ -5,7 +5,7 @@ import logging
 import os
 import subprocess
 import tempfile
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import soundfile as sf
@@ -78,6 +78,30 @@ def resample(audio: np.ndarray, sr: int, target: int = MODEL_RATE) -> np.ndarray
     import soxr
 
     return soxr.resample(audio, sr, target).astype(np.float32, copy=False)
+
+
+def split_on_silence(
+    audio: np.ndarray, max_samples: int, search_samples: int, window: int = MODEL_RATE // 10
+) -> List[np.ndarray]:
+    """Split a waveform into pieces of at most `max_samples`, cutting at the quietest point.
+
+    Each cut is placed in the `window`-long stretch with the least energy among the last
+    `search_samples` before the length limit, ideally a pause between words. The pieces
+    are views that together are exactly `audio`.
+    """
+    if max_samples <= 0 or audio.shape[0] <= max_samples:
+        return [audio]
+    search_samples = min(max(search_samples, window), max_samples // 2)
+    pieces = []
+    start = 0
+    while audio.shape[0] - start > max_samples:
+        lo, hi = start + max_samples - search_samples, start + max_samples
+        energy = np.convolve(np.square(audio[lo:hi], dtype=np.float32), np.ones(window, dtype=np.float32), mode="valid")
+        cut = lo + int(np.argmin(energy)) + window // 2
+        pieces.append(audio[start:cut])
+        start = cut
+    pieces.append(audio[start:])
+    return pieces
 
 
 class PcmS16Decoder:

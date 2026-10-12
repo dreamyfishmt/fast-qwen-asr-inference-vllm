@@ -77,6 +77,9 @@ affordable:
 - On `stop`, a partial still running is aborted and the final result is computed right away, again continuing
   from the last partial.
 - Requests are transcribed one at a time; a partial is skipped when another request is being transcribed.
+- Audio longer than `ONNX_SEGMENT_SEC` (30 s), uploads and long utterances alike, is transcribed in segments cut at
+  pauses. That keeps the decoder fast and the token budget (`MAX_NEW_TOKENS`) per segment, and lets a stream's final
+  result run between the segments of a long upload instead of waiting for all of it.
 
 Measured with 2 cores of an Intel Xeon (2.1 GHz, AVX-512) and audio sent at real-time speed; expect slower
 results on CPUs without AVX-512 / AMX:
