@@ -63,8 +63,10 @@ and `cd` into it); it has the compose files and the download script.
 Build the CPU image locally instead of pulling it:
 `docker compose -f compose.cpu.yaml -f compose.cpu.local.yaml up -d --build`.
 
-The CPU image has no ffmpeg: uploads can be WAV/FLAC/OGG/MP3 (what libsndfile reads), and forced
-alignment is not available.
+The CPU image has no ffmpeg: uploads can be WAV/FLAC/OGG/MP3 (what libsndfile reads).
+
+Word timestamps and speaker diarization are optional extra models: see
+[Timestamps and diarization](timestamps-diarization.md) (~1.5 GB more RAM with both).
 
 ## How streaming works on CPU
 

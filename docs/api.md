@@ -72,9 +72,13 @@ Upload one or more audio files.
 - **URL**: `http://127.0.0.1:8907/transcribe?language=zh-CN`
 - **Body**: multipart/form-data, one or more `files` fields
 - **Query**: `language` (optional), `context` (optional, see [Context](#context)), `forced_alignment=true|false`
-  (vLLM image with `ENABLE_ALIGNER_MODEL=true` only)
-- **Response**: `[{"text": "...", "language": "Chinese"}, ...]` (plus `timestamps` with forced alignment:
-  `{"items": [{"text", "start_time", "end_time"}, ...]}`, times in seconds)
+  (needs `ENABLE_ALIGNER_MODEL=true`), `diarize=true|false` and `num_speakers` (needs `ENABLE_DIARIZATION=true`,
+  ONNX images; see [Timestamps and diarization](timestamps-diarization.md))
+- **Response**: `[{"text": "...", "language": "Chinese"}, ...]`, plus, times in seconds:
+  - with forced alignment: `timestamps` (`{"items": [{"text", "start_time", "end_time"}, ...]}`) and `segments`
+    (`[{"start", "end", "text"}, ...]`: the transcript in pieces, split at pauses over 0.8 s and after 10 s)
+  - with `diarize`: `speakers` (`[{"start", "end", "speaker"}, ...]`, speakers numbered from 0). `diarize` also
+    aligns when the aligner is loaded, and then every segment has a `speaker` and segments split where it changes
 
 ```bash
 curl -X POST "http://127.0.0.1:8907/transcribe?language=de" -F "files=@files/reference.wav"
@@ -92,14 +96,17 @@ and using `API_TOKEN` as the API key (any value if the server has no token).
 | `model` | Accepted and ignored (the server runs one model) |
 | `language` | Optional; any code from [Languages](#languages) |
 | `prompt` | Used as the [context](#context) |
-| `response_format` | `json` (default), `text`, `srt`, `vtt`, `verbose_json` |
+| `response_format` | `json` (default), `text`, `srt`, `vtt`, `verbose_json`, `diarized_json` (needs the forced aligner and diarization) |
 | `timestamp_granularities[]` | `segment` (default) and/or `word` with `verbose_json`; `word` needs the forced aligner |
 | `temperature` | Accepted and ignored (decoding is greedy) |
 | `stream` | `true` is rejected; use [`WS /transcribe-streaming`](#ws-transcribe-streaming) |
+| `num_speakers` | Extension: number of speakers for `diarized_json`, if known |
 
-Timestamps: with the forced aligner (vLLM image, `ENABLE_ALIGNER_MODEL=true`), `srt`, `vtt` and `verbose_json`
+Timestamps: with the forced aligner (`ENABLE_ALIGNER_MODEL=true`), `srt`, `vtt` and `verbose_json`
 segments are built from word timings (a new segment after a 0.8 s pause or 10 s). Without it, the whole file is one
 segment from 0 to its duration. `verbose_json` reports `language` in lowercase (`"german"`), like OpenAI.
+`diarized_json` returns `{"task", "duration", "text", "segments": [{"type": "transcript.text.segment", "id", "start",
+"end", "text", "speaker"}]}` with speakers `A`, `B`, … (see [Timestamps and diarization](timestamps-diarization.md)).
 
 ```bash
 curl http://127.0.0.1:8907/v1/audio/transcriptions -H "Authorization: Bearer $API_TOKEN" \

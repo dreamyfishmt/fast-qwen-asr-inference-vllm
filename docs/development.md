@@ -12,9 +12,12 @@ asr_server/
 ├── service.py             shared state: engine, loading status, concurrency limits, batch transcription
 ├── app.py                 FastAPI app: /health, /ready, /transcribe, /transcribe-streaming, upload size limit
 ├── openai_api.py          /v1/audio/transcriptions, /v1/models
+├── timeline.py            word timings -> segments, speakers of words and segments
+├── diarization.py         speaker diarization (sherpa-onnx)
 └── engines/               inference backends (same interface, selected by ASR_BACKEND)
     ├── vllm_engine.py     qwen-asr + vLLM
-    └── onnx_engine.py     ONNX Runtime (CPU or CUDA)
+    ├── onnx_engine.py     ONNX Runtime (CPU or CUDA)
+    └── onnx_aligner.py    forced aligner (word timestamps) for the ONNX backend
 tests/                     pytest suite (runs against a fake engine, no model needed)
 scripts/                   model download, docs generation
 client-streaming.py        streaming test client
@@ -28,8 +31,8 @@ with `uv sync --frozen`, so every build of a commit gets the same versions. Each
 
 | Extra | Image | Installs |
 |---|---|---|
-| `cpu` | `Dockerfile.cpu` | onnxruntime |
-| `gpu` | `Dockerfile.gpu` | onnxruntime-gpu (pinned) + CUDA 13 wheels |
+| `cpu` | `Dockerfile.cpu` | onnxruntime, sherpa-onnx |
+| `gpu` | `Dockerfile.gpu` | onnxruntime-gpu (pinned) + CUDA 13 wheels, sherpa-onnx |
 | `vllm` | `Dockerfile` | qwen-asr[vllm] (vLLM, PyTorch) |
 
 The extras conflict with each other (`[tool.uv] conflicts`), so only one can be installed at a time.
@@ -86,8 +89,11 @@ curl -X POST "http://127.0.0.1:8907/transcribe?language=de" \
 # OpenAI-compatible
 curl http://127.0.0.1:8907/v1/audio/transcriptions -F file=@files/reference.wav -F response_format=verbose_json
 
-# forced alignment (vLLM image with ENABLE_ALIGNER_MODEL=true)
+# forced alignment (ENABLE_ALIGNER_MODEL=true)
 curl -X POST "http://127.0.0.1:8907/transcribe?language=de&forced_alignment=true" -F "files=@files/reference.wav"
+
+# speaker diarization (ONNX images, ENABLE_DIARIZATION=true; see timestamps-diarization.md)
+curl -X POST "http://127.0.0.1:8907/transcribe?diarize=true" -F "files=@files/reference.wav"
 ```
 
 `files/reference.m4a` only works with the vLLM image (it needs ffmpeg).

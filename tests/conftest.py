@@ -63,16 +63,33 @@ class FakeEngine(Engine):
         return stream
 
 
+class FakeDiarizer:
+    """Speaker 0 until 1 s, then speaker 1."""
+
+    def __init__(self):
+        self.calls = []
+
+    def load(self):
+        pass
+
+    def warmup(self):
+        pass
+
+    def diarize(self, wav, sr, num_speakers=None):
+        self.calls.append(num_speakers)
+        return [{"start": 0.0, "end": 1.0, "speaker": 0}, {"start": 1.8, "end": 2.5, "speaker": 1}]
+
+
 @pytest.fixture
 def make_client(monkeypatch):
     clients = []
 
-    def make(engine: Optional[FakeEngine] = None, **settings):
+    def make(engine: Optional[FakeEngine] = None, diarizer: Optional[FakeDiarizer] = None, **settings):
         monkeypatch.setattr(config, "EXIT_ON_LOAD_FAILURE", False)
         for key, value in settings.items():
             monkeypatch.setattr(config, key, value)
         engine = engine or FakeEngine()
-        client = TestClient(create_app(engine))
+        client = TestClient(create_app(engine, diarizer))
         client.__enter__()
         clients.append(client)
         client.engine = engine

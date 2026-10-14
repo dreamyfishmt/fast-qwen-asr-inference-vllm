@@ -13,6 +13,7 @@ from . import config
 from .audio import DecodeError, read_audio_file
 from .engines import Audio, Engine
 from .language import get_converter
+from .timeline import assign_speakers, build_segments, words_from_alignment
 
 logger = logging.getLogger(__name__)
 
@@ -80,8 +81,9 @@ STREAM, BATCH = 0, 1
 
 
 class Service:
-    def __init__(self, engine: Engine):
+    def __init__(self, engine: Engine, diarizer=None):
         self.engine = engine
+        self.diarizer = diarizer  # asr_server.diarization.Diarizer, or None
         self.status = "starting"
         self.ready_event = asyncio.Event()
         self.decode_sem = asyncio.Semaphore(config.MAX_CONCURRENT_DECODE)
@@ -113,6 +115,8 @@ class Service:
         self.status = "loading_models"
         try:
             await asyncio.to_thread(self.engine.load)
+            if self.diarizer is not None:
+                await asyncio.to_thread(self.diarizer.load)
         except Exception as e:
             logger.exception(f"Failed to load models: {e}")
             self.status = "error"
@@ -128,6 +132,8 @@ class Service:
         self.status = "warming_up"
         try:
             await self.run_infer(self.engine.warmup)
+            if self.diarizer is not None:
+                await self.run_infer(self.diarizer.warmup)
             logger.info("Warmup complete.")
         except Exception as e:
             logger.warning(f"Warmup failed (non-critical): {e}")
@@ -160,19 +166,38 @@ class Service:
         opencc_config: Optional[str],
         context: str = "",
         align: bool = False,
+        diarize: bool = False,
+        num_speakers: Optional[int] = None,
     ) -> List[dict]:
-        """Returns [{"text", "language"[, "timestamps"]}] per input; timestamps are the aligner's result."""
+        """Returns [{"text", "language"[, "timestamps"][, "speakers"][, "segments"]}] per input.
+
+        timestamps: the aligner's result (align); speakers: speaker turns (diarize); segments (with timestamps):
+        the transcript in timed pieces, each with its speaker when diarized. `diarize` also aligns when the
+        engine can, so that the words can be given speakers.
+        """
         if align and not self.engine.supports_alignment:
             raise ServiceError(503, "Aligner model is not enabled or not supported by this backend.")
+        if diarize and self.diarizer is None:
+            raise ServiceError(503, "Speaker diarization is not enabled (ENABLE_DIARIZATION=true).")
+        align = align or (diarize and self.engine.supports_alignment)
         convert = get_converter(opencc_config)
         try:
-            results = await self.run_infer(self.engine.transcribe, audios, language, context)
-            out = [{"text": convert(text), "language": lang} for text, lang in results]
             if align:
-                texts = [text for text, _ in results]  # align against the model's original script
-                alignments = await self.run_infer(self.engine.align, audios, texts, language)
-                for item, alignment in zip(out, alignments):
+                results = await self.run_infer(self.engine.transcribe_aligned, audios, language, context)
+            else:
+                results = [(text, lang, None) for text, lang in await self.run_infer(self.engine.transcribe, audios, language, context)]
+            out = []
+            for (wav, sr), (text, lang, alignment) in zip(audios, results):
+                item = {"text": convert(text), "language": lang}
+                if align:
                     item["timestamps"] = alignment
+                if diarize:
+                    item["speakers"] = await self.run_infer(self.diarizer.diarize, wav, sr, num_speakers)
+                if align:
+                    words = words_from_alignment(alignment)  # timed words in the model's original script
+                    assign_speakers(words, item.get("speakers", []))
+                    item["segments"] = build_segments(words, text, round(wav.shape[0] / sr, 3), convert)
+                out.append(item)
             return out
         except Exception as e:
             logger.exception(f"Inference failed: {e}")

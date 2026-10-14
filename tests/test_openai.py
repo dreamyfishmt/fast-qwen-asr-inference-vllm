@@ -69,3 +69,27 @@ def test_auth_and_models(make_client):
 def test_upload_limit_applies(make_client):
     c = make_client(MAX_UPLOAD_MB=0.05)
     assert post(c, audio=wav_bytes(3.0)).status_code == 413
+
+
+def test_diarized_json(make_client):
+    from .conftest import FakeDiarizer
+
+    diarizer = FakeDiarizer()
+    c = make_client(FakeEngine(supports_alignment=True), diarizer)
+    body = post(c, {"response_format": "diarized_json", "num_speakers": "2"}).json()
+    assert body["duration"] == 2.5 and body["text"] == "40000 samples at 16000 Hz"
+    assert [(s["id"], s["start"], s["end"], s["text"], s["speaker"]) for s in body["segments"]] == [
+        ("seg_000", 0.1, 0.5, "Das ist", "A"), ("seg_001", 2.0, 2.4, "gut", "B")
+    ]
+    assert body["segments"][0]["type"] == "transcript.text.segment"
+    assert diarizer.calls == [2]
+
+
+def test_diarized_json_needs_diarizer_and_aligner(make_client):
+    from .conftest import FakeDiarizer
+
+    for c in (make_client(FakeEngine(supports_alignment=True)), make_client(FakeEngine(), FakeDiarizer())):
+        r = post(c, {"response_format": "diarized_json"})
+        assert r.status_code == 400 and r.json()["error"]["param"] == "response_format"
+    r = post(make_client(FakeEngine(supports_alignment=True), FakeDiarizer()), {"response_format": "diarized_json", "num_speakers": "99"})
+    assert r.status_code == 400 and r.json()["error"]["param"] == "num_speakers"

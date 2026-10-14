@@ -25,6 +25,7 @@ builds it locally.
 | [CPU deployment](docs/deployment-cpu.md) | ONNX Runtime on a CPU-only server, HTTPS with Caddy, CPU streaming performance |
 | [vLLM image](docs/deployment-vllm.md) | qwen-asr + vLLM, FP8 model, forced aligner |
 | [API](docs/api.md) | Endpoints, OpenAI compatibility, streaming protocol, authentication, languages, limits |
+| [Timestamps and diarization](docs/timestamps-diarization.md) | Word timestamps and speaker diarization for the ONNX images |
 | [Configuration](docs/configuration.md) | Every environment variable |
 | [Development](docs/development.md) | Code layout, dependencies (uv), tests, trying the server, benchmarks, releasing |
 

@@ -18,6 +18,11 @@ services:
       ONNX_THREADS: ${ONNX_THREADS:-0}
       # Decoder file in the model folder (empty = auto-detect)
       ONNX_DECODER: ${ONNX_DECODER:-}
+      # Optional: word timestamps (forced aligner) and speaker diarization, see docs/api.md
+      ENABLE_ALIGNER_MODEL: ${ENABLE_ALIGNER_MODEL:-false}
+      ALIGNER_MODEL_NAME: /models/${ALIGNER_MODEL_DIR:-qwen3-forcedaligner-0.6b-onnx}
+      ENABLE_DIARIZATION: ${ENABLE_DIARIZATION:-false}
+      DIARIZATION_MODEL_NAME: /models/${DIARIZATION_MODEL_DIR:-speaker-diarization}
       MAX_CONCURRENT_INFER: "1"
       STREAM_PARTIALS: ${STREAM_PARTIALS:-true}
       STREAM_PARTIAL_INTERVAL_SEC: ${STREAM_PARTIAL_INTERVAL_SEC:-2.0}

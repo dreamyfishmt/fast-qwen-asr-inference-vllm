@@ -36,6 +36,7 @@ from ..audio import resample, split_on_silence
 from ..config import env
 from ..language import join_text
 from . import Audio, Engine, Stream
+from .onnx_aligner import OnnxAligner, offset_items
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,14 @@ ONNX_PROVIDER = env(
     group=GROUP,
 ).lower()
 ONNX_DEVICE_ID = env("ONNX_DEVICE_ID", 0, "GPU index for `ONNX_PROVIDER=cuda`", group=GROUP)
+ENABLE_ALIGNER_MODEL = env(
+    "ENABLE_ALIGNER_MODEL", False, "Load the forced aligner (word timestamps; ~1.3 GB more memory)", group=GROUP,
+)
+ALIGNER_MODEL_NAME = env(
+    "ALIGNER_MODEL_NAME", "/models/qwen3-forcedaligner-0.6b-onnx",
+    "Forced aligner directory (ONNX export of Qwen3-ForcedAligner-0.6B, see `scripts/download-models.sh aligner`)",
+    group=GROUP,
+)
 
 STREAM_PARTIALS = env("STREAM_PARTIALS", True, "Send live partial results", group=GROUP)
 STREAM_PARTIAL_INTERVAL_SEC = env("STREAM_PARTIAL_INTERVAL_SEC", 2.0, "Seconds of new audio between partials", group=GROUP)
@@ -478,6 +487,11 @@ class OnnxEngine(Engine):
         self._prefix_key: Optional[Tuple[int, ...]] = None
         self._prefix_kv = None
         self._token_cache = {}
+        self.aligner: Optional[OnnxAligner] = None
+
+    @property
+    def supports_alignment(self) -> bool:
+        return self.aligner is not None
 
     def load(self) -> None:
         import onnxruntime as ort
@@ -582,9 +596,19 @@ class OnnxEngine(Engine):
         self._tokenizer = Tokenizer.from_file(str(d / "tokenizer.json"))
         self._mel_filters = _mel_filterbank()
 
+        if ENABLE_ALIGNER_MODEL:
+            aligner = OnnxAligner(Path(ALIGNER_MODEL_NAME))
+            aligner.load(session)  # an absolute path replaces the model directory
+            self.aligner = aligner
+        else:
+            logger.info("Forced aligner disabled (ENABLE_ALIGNER_MODEL=false)")
+
     def warmup(self) -> None:
         with self.infer_lock:
-            self.transcribe_one(np.zeros(RATE, dtype=np.float32), "English", "")
+            silence = np.zeros(RATE, dtype=np.float32)
+            self.transcribe_one(silence, "English", "")
+            if self.aligner is not None:
+                self.aligner.align(log_mel_spectrogram(silence, self._mel_filters), "hello", "English")
 
     # ---- prompt ----
 
@@ -713,22 +737,36 @@ class OnnxEngine(Engine):
         length), and infer_lock is taken per segment, so other work can run in between. `prefix` (tokens
         of a transcription of the first `prefix_samples` samples) continues the first segment if it covers them.
         """
+        text, detected, _ = self._transcribe_segments(audio, language, context, prefix, prefix_samples)
+        return text, detected
+
+    def _transcribe_segments(
+        self, audio: np.ndarray, language: Optional[str], context: str, prefix: Sequence[int] = (), prefix_samples: int = 0,
+        align: bool = False,
+    ) -> Tuple[str, str, List[dict]]:
+        """transcribe_long(), plus word timings when `align` is set: each segment is aligned right after it is
+        transcribed (a segment is at most ONNX_SEGMENT_SEC, well within the aligner's 5 minutes)."""
         segments = split_on_silence(audio, int(SEGMENT_SEC * RATE), int(SEGMENT_SEARCH_SEC * RATE))
-        texts, languages = [], []
+        texts, languages, items = [], [], []
+        offset = 0
         for i, segment in enumerate(segments):
             p = prefix if i == 0 and segment.shape[0] >= prefix_samples else ()
             with self.infer_lock:
                 tokens = self.transcribe_tokens(segment, language, context, prefix=p)
-            text, detected = self.parse(tokens, language)
+                text, detected = self.parse(tokens, language)
+                if align and text:
+                    mel = log_mel_spectrogram(segment, self._mel_filters)
+                    items.extend(offset_items(self.aligner.align(mel, text, language or detected), offset / RATE))
             if text:
                 texts.append(text)
                 languages.append(detected)
+            offset += segment.shape[0]
         if len(segments) > 1:
             logger.info(f"Transcribed {audio.shape[0] / RATE:.1f}s of audio in {len(segments)} segments")
         if not languages:
-            return "", language or ""
+            return "", language or "", items
         # with auto-detection, the language detected in most segments
-        return join_text(texts), max(languages, key=languages.count)
+        return join_text(texts), max(languages, key=languages.count), items
 
     def transcribe_one(
         self, audio: np.ndarray, language: Optional[str], context: str, cancel: Optional[threading.Event] = None
@@ -738,14 +776,36 @@ class OnnxEngine(Engine):
 
     # ---- Engine API ----
 
+    @staticmethod
+    def _mono16k(wav: np.ndarray, sr: int) -> np.ndarray:
+        if wav.ndim > 1:
+            wav = wav.mean(axis=1)
+        return resample(wav.astype(np.float32, copy=False), sr, RATE)
+
     def transcribe(
         self, audios: Sequence[Audio], language: Optional[str], context: str = ""
     ) -> List[Tuple[str, str]]:
+        return [self.transcribe_long(self._mono16k(wav, sr), language, context) for wav, sr in audios]
+
+    def transcribe_aligned(
+        self, audios: Sequence[Audio], language: Optional[str], context: str = ""
+    ) -> List[Tuple[str, str, dict]]:
+        if self.aligner is None:
+            raise RuntimeError("Aligner model is not enabled.")
         out = []
         for wav, sr in audios:
-            if wav.ndim > 1:
-                wav = wav.mean(axis=1)
-            out.append(self.transcribe_long(resample(wav.astype(np.float32, copy=False), sr, RATE), language, context))
+            text, detected, items = self._transcribe_segments(self._mono16k(wav, sr), language, context, align=True)
+            out.append((text, detected, {"items": items}))
+        return out
+
+    def align(self, audios: Sequence[Audio], texts: Sequence[str], languages: Sequence[Optional[str]]) -> list:
+        if self.aligner is None:
+            raise RuntimeError("Aligner model is not enabled.")
+        out = []
+        for (wav, sr), text, language in zip(audios, texts, languages):
+            mel = log_mel_spectrogram(self._mono16k(wav, sr), self._mel_filters)
+            with self.infer_lock:
+                out.append({"items": self.aligner.align(mel, text, language)})
         return out
 
     def new_stream(self, language: Optional[str], context: str = "") -> Stream:

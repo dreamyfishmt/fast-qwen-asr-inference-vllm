@@ -130,10 +130,11 @@ class VllmEngine(Engine):
         )
         return [(r.text, r.language) for r in results]
 
-    def align(self, audios: Sequence[Audio], texts: Sequence[str], language: Optional[str]) -> list:
+    def align(self, audios: Sequence[Audio], texts: Sequence[str], languages: Sequence[Optional[str]]) -> list:
         if self.aligner is None:
             raise RuntimeError("Aligner model is not enabled or failed to load.")
-        return self.aligner.align(audio=list(audios), text=list(texts), language=[language] * len(audios))
+        # qwen_asr needs a language name (it picks the word splitter by it)
+        return self.aligner.align(audio=list(audios), text=list(texts), language=[lang or "English" for lang in languages])
 
     def new_stream(self, language: Optional[str], context: str = "") -> Stream:
         state = self.asr.init_streaming_state(

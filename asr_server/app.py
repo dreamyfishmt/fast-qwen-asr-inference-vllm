@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse
 from . import config
 from .audio import MODEL_RATE, PcmS16Decoder, StreamResampler
 from .auth import install_log_redaction, token_ok
+from .diarization import ENABLE_DIARIZATION, MAX_SPEAKERS, Diarizer
 from .engines import Engine, create_engine
 from .language import get_converter, map_language
 from .openai_api import router as openai_router
@@ -67,8 +68,11 @@ async def _send_json(send, status: int, detail: str) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
-def create_app(engine: Optional[Engine] = None) -> FastAPI:
-    service = Service(engine or create_engine(config.ASR_BACKEND))
+def create_app(engine: Optional[Engine] = None, diarizer: Optional[Diarizer] = None) -> FastAPI:
+    if engine is None:
+        engine = create_engine(config.ASR_BACKEND)
+        diarizer = diarizer or (Diarizer() if ENABLE_DIARIZATION else None)
+    service = Service(engine, diarizer)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -125,6 +129,8 @@ def create_app(engine: Optional[Engine] = None) -> FastAPI:
         info = {
             "status": service.status,
             "backend": service.engine.name,
+            "forced_alignment": service.engine.supports_alignment,
+            "diarization": service.diarizer is not None,
             "limits": {
                 "max_concurrent_decode": config.MAX_CONCURRENT_DECODE,
                 "max_concurrent_infer": config.MAX_CONCURRENT_INFER,
@@ -160,6 +166,8 @@ def create_app(engine: Optional[Engine] = None) -> FastAPI:
         language: Optional[str] = Query(None, description="Language code (e.g. en, de, zh-CN, zh-TW). None for auto-detect."),
         context: str = Query("", description="Context / vocabulary hints, e.g. 'Vocabulary: Kubernetes, QwenType.'"),
         forced_alignment: bool = Query(False, description="Enable forced alignment (timestamps)"),
+        diarize: bool = Query(False, description="Speaker diarization (speaker turns; segments with speakers)"),
+        num_speakers: Optional[int] = Query(None, ge=1, le=MAX_SPEAKERS, description="Number of speakers, if known"),
     ):
         if config.MAX_FILES and len(files) > config.MAX_FILES:
             raise ServiceError(413, f"Too many files: {len(files)} (MAX_FILES={config.MAX_FILES})")
@@ -171,7 +179,9 @@ def create_app(engine: Optional[Engine] = None) -> FastAPI:
 
         contents = [await f.read() for f in files]
         audios = await service.decode(contents, [f.filename for f in files])
-        return await service.transcribe(audios, full_lang, opencc_config, context, align=forced_alignment)
+        return await service.transcribe(
+            audios, full_lang, opencc_config, context, align=forced_alignment, diarize=diarize, num_speakers=num_speakers
+        )
 
     @app.websocket("/transcribe-streaming")
     async def transcribe_streaming(

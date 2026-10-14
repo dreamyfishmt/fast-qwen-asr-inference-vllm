@@ -79,6 +79,9 @@ partials every second for the whole utterance, and the final result is always a 
 
 Build locally instead of pulling: `docker compose -f compose.gpu.yaml -f compose.gpu.local.yaml up -d --build`.
 
+Word timestamps and speaker diarization are optional extra models: see
+[Timestamps and diarization](timestamps-diarization.md).
+
 ## Settings
 
 Set in `.env` (see `.env.gpu.example`); all server settings are listed in [configuration.md](configuration.md).
@@ -88,6 +91,7 @@ Set in `.env` (see `.env.gpu.example`); all server settings are listed in [confi
 | `ASR_MODEL_DIR` | `qwen3-asr-1.7b-onnx` | Model folder inside `MODEL_DIR` |
 | `ONNX_PROVIDER` | `cuda` (image default) | `cuda` or `cpu` |
 | `ONNX_DEVICE_ID` | `0` | GPU index |
+| `ENABLE_ALIGNER_MODEL` / `ENABLE_DIARIZATION` | `false` | Word timestamps / speaker diarization, see [Timestamps and diarization](timestamps-diarization.md) |
 | `ONNX_DECODER` / `ONNX_ENCODER` | auto | Decoder / encoder file in the model folder; auto prefers `decoder-*fp16*` on the GPU and `decoder-*fp32*` on the CPU, and `encoder.int4.onnx`, then `encoder.fp16.onnx` on the GPU and `encoder.onnx` on the CPU |
 | `STREAM_PARTIAL_INTERVAL_SEC` / `STREAM_PARTIAL_MAX_SEC` | `1.0` / `60` | Partial cadence and cutoff |
 | `STREAM_FINAL_REUSE_PARTIAL` | `false` | Continue the final result from the last partial (see [How streaming works on CPU](deployment-cpu.md#how-streaming-works-on-cpu)) |

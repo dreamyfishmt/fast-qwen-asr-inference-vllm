@@ -11,8 +11,10 @@ from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from .config import env
-from .language import join_text, map_language
+from .diarization import MAX_SPEAKERS
+from .language import map_language
 from .service import Service, ServiceError
+from .timeline import words_from_alignment
 
 logger = logging.getLogger(__name__)
 
@@ -20,11 +22,7 @@ OPENAI_MODEL_NAME = env(
     "OPENAI_MODEL_NAME", "qwen3-asr", "Model id listed by `GET /v1/models` (the `model` form field is accepted but ignored)",
     group="OpenAI API",
 )
-# Word-timestamp segments: start a new segment after a pause this long, or once a segment is this long
-SEGMENT_GAP_SEC = 0.8
-SEGMENT_MAX_SEC = 10.0
-
-RESPONSE_FORMATS = ("json", "text", "srt", "verbose_json", "vtt")
+RESPONSE_FORMATS = ("json", "text", "srt", "verbose_json", "vtt", "diarized_json")
 
 router = APIRouter(prefix="/v1")
 
@@ -50,6 +48,7 @@ async def create_transcription(
     temperature: Optional[float] = Form(None),  # accepted for compatibility; decoding is greedy
     timestamp_granularities: Optional[List[str]] = Form(None, alias="timestamp_granularities[]"),
     stream: Optional[bool] = Form(None),
+    num_speakers: Optional[int] = Form(None),  # extension for diarized_json: the number of speakers, if known
 ):
     service: Service = request.app.state.service
     if response_format not in RESPONSE_FORMATS:
@@ -63,12 +62,20 @@ async def create_transcription(
         full_lang, opencc_config = map_language(language)
     except ValueError as e:
         return _error(400, str(e), "language")
+    diarize = response_format == "diarized_json"
+    if diarize and (service.diarizer is None or not service.engine.supports_alignment):
+        return _error(
+            400, "diarized_json needs speaker diarization and the forced aligner (ENABLE_DIARIZATION=true, ENABLE_ALIGNER_MODEL=true)",
+            "response_format",
+        )
+    if num_speakers is not None and not 1 <= num_speakers <= MAX_SPEAKERS:
+        return _error(400, f"num_speakers must be between 1 and {MAX_SPEAKERS}", "num_speakers")
 
     # Word timings come from the forced aligner; segment timings use them when it is available.
     want_words = response_format == "verbose_json" and "word" in granularities
     if want_words and not service.engine.supports_alignment:
         return _error(
-            400, "Word timestamps need the forced aligner (vLLM image with ENABLE_ALIGNER_MODEL=true)",
+            400, "Word timestamps need the forced aligner (ENABLE_ALIGNER_MODEL=true)",
             "timestamp_granularities[]",
         )
     timed = response_format in ("srt", "vtt", "verbose_json")
@@ -77,7 +84,9 @@ async def create_transcription(
     try:
         await service.wait_ready()
         audios = await service.decode([await file.read()], [file.filename])
-        result = (await service.transcribe(audios, full_lang, opencc_config, prompt or "", align=align))[0]
+        result = (await service.transcribe(
+            audios, full_lang, opencc_config, prompt or "", align=align, diarize=diarize, num_speakers=num_speakers
+        ))[0]
     except ServiceError as e:
         return _error(e.status, e.message, "file" if e.status == 400 else None)
 
@@ -89,8 +98,12 @@ async def create_transcription(
 
     wav, sr = audios[0]
     duration = round(wav.shape[0] / sr, 3)
-    words = _words(result.get("timestamps"))
-    segments = _segments(words, text, duration)
+    words = words_from_alignment(result.get("timestamps"))
+    # without word timings, the whole file is one segment
+    segments = result.get("segments") or ([{"start": 0.0, "end": duration, "text": text}] if text else [])
+
+    if diarize:
+        return _diarized(text, duration, segments)
 
     if response_format == "srt":
         return PlainTextResponse(_srt(segments))
@@ -110,34 +123,23 @@ async def create_transcription(
     return body
 
 
-def _words(alignment) -> List[dict]:
-    """Aligner output ({"items": [{"text", "start_time", "end_time"}]} or a list of such items) -> OpenAI words."""
-    if alignment is None:
-        return []
-    if isinstance(alignment, dict):
-        items = alignment.get("items", [])
-    else:  # qwen_asr ForcedAlignResult (iterable of ForcedAlignItem)
-        items = getattr(alignment, "items", alignment)
-    words = []
-    for it in items:
-        get = it.get if isinstance(it, dict) else lambda k, it=it: getattr(it, k)
-        words.append({"word": get("text"), "start": round(float(get("start_time")), 3), "end": round(float(get("end_time")), 3)})
-    return words
+def _speaker_name(index: int) -> str:
+    """OpenAI's labels for unknown speakers: A, B, ..."""
+    return chr(ord("A") + index) if index < 26 else f"S{index}"
 
 
-def _segments(words: List[dict], text: str, duration: float) -> List[dict]:
-    """Group aligned words into segments; without word timings, one segment spans the whole file."""
-    if not words:
-        return [{"start": 0.0, "end": duration, "text": text}] if text else []
-    segments, current = [], []
-    for w in words:
-        if current and (w["start"] - current[-1]["end"] > SEGMENT_GAP_SEC or w["end"] - current[0]["start"] > SEGMENT_MAX_SEC):
-            segments.append(current)
-            current = []
-        current.append(w)
-    if current:
-        segments.append(current)
-    return [{"start": s[0]["start"], "end": s[-1]["end"], "text": join_text(w["word"] for w in s)} for s in segments]
+def _diarized(text: str, duration: float, segments: List[dict]) -> dict:
+    """OpenAI's diarized_json: the transcript in pieces, each with its speaker."""
+    return {
+        "task": "transcribe",
+        "duration": duration,
+        "text": text,
+        "segments": [
+            {"type": "transcript.text.segment", "id": f"seg_{i:03d}", "start": s["start"], "end": s["end"],
+             "text": s["text"], "speaker": _speaker_name(s.get("speaker", 0))}
+            for i, s in enumerate(segments)
+        ],
+    }
 
 
 def _timestamp(sec: float, sep: str) -> str:

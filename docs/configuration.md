@@ -12,7 +12,8 @@ Used by the compose files themselves (not read by the server):
 |---|---|---|
 | `MODEL_DIR` | all | Host directory with the model folders, mounted read-only at `/models` |
 | `ASR_MODEL_DIR` | all | Model folder inside `MODEL_DIR` (becomes `ASR_MODEL_NAME=/models/<dir>`) |
-| `ALIGNER_MODEL_DIR` | `compose.yaml` | Aligner folder inside `MODEL_DIR` |
+| `ALIGNER_MODEL_DIR` | all | Forced aligner folder inside `MODEL_DIR` (becomes `ALIGNER_MODEL_NAME`) |
+| `DIARIZATION_MODEL_DIR` | `compose.cpu.yaml`, `compose.gpu.yaml` | Speaker diarization folder inside `MODEL_DIR` (becomes `DIARIZATION_MODEL_NAME`) |
 | `PORT` | all | Host port (default `8907`) |
 | `BIND_ADDR` | all | Host interface (`127.0.0.1` for GPU/vLLM, `0.0.0.0` for CPU) |
 | `CONTAINER` | all | Container name |
@@ -75,7 +76,9 @@ server's own, before any compose file overrides them.
 
 | Variable | Default | Description |
 |---|---|---|
+| `ALIGNER_MODEL_NAME` | `/models/qwen3-forcedaligner-0.6b-onnx` | Forced aligner directory (ONNX export of Qwen3-ForcedAligner-0.6B, see `scripts/download-models.sh aligner`) |
 | `ASR_MODEL_NAME` | `/models/qwen3-asr-0.6b-onnx` | Model directory |
+| `ENABLE_ALIGNER_MODEL` | `false` | Load the forced aligner (word timestamps; ~1.3 GB more memory) |
 | `MAX_NEW_TOKENS` | `1024` | Most tokens generated per transcription (per segment, see `ONNX_SEGMENT_SEC`) |
 | `ONNX_DECODER` | — | Decoder graph file in the model directory (empty = auto-detect: gqa, then merged, then split) |
 | `ONNX_DEVICE_ID` | `0` | GPU index for `ONNX_PROVIDER=cuda` |
@@ -107,5 +110,16 @@ server's own, before any compose file overrides them.
 | `STREAM_UNFIXED_CHUNK_NUM` | `2` | First N chunks are decoded without a text prefix |
 | `STREAM_UNFIXED_TOKEN_NUM` | `5` | Trailing tokens rolled back (re-decoded) on each step |
 | `VLLM_QUANTIZATION` | — | vLLM quantization method, e.g. `modelopt` for ModelOpt FP8 checkpoints (empty = from the checkpoint config) |
+
+### Speaker diarization
+
+| Variable | Default | Description |
+|---|---|---|
+| `DIARIZATION_MIN_DURATION_OFF` | `0.5` | Pauses of one speaker shorter than this are bridged, in seconds |
+| `DIARIZATION_MIN_DURATION_ON` | `0.3` | Shortest speech turn kept, in seconds |
+| `DIARIZATION_MODEL_NAME` | `/models/speaker-diarization` | Directory with `segmentation.onnx` and `embedding.onnx` (see `scripts/download-models.sh diarization`) |
+| `DIARIZATION_THREADS` | `0` | Threads per diarization model (0 = all cores) |
+| `DIARIZATION_THRESHOLD` | `0.5` | Clustering threshold when the number of speakers is not given: higher = fewer speakers |
+| `ENABLE_DIARIZATION` | `false` | Load the speaker diarization models (`diarize=true`) |
 
 <!-- END GENERATED -->

@@ -106,3 +106,45 @@ def test_load_failure_stops_server(make_client, monkeypatch):
     assert r.status_code == 503
     c.__exit__(None, None, None)
     assert killed[-1] == ("exit", 1)
+
+
+def test_health_reports_features(make_client):
+    from .conftest import FakeDiarizer
+
+    body = make_client(FakeEngine(supports_alignment=True), FakeDiarizer()).get("/health").json()
+    assert body["forced_alignment"] is True and body["diarization"] is True
+    body = make_client().get("/health").json()
+    assert body["forced_alignment"] is False and body["diarization"] is False
+
+
+def test_diarization(make_client):
+    from .conftest import FakeDiarizer
+
+    c = make_client(FakeEngine(supports_alignment=True), FakeDiarizer())
+    r = c.post("/transcribe?diarize=true&num_speakers=2", files=[("files", ("a.wav", wav_bytes(2.5)))])
+    item = r.json()[0]
+    # diarize also aligns: the words get speakers, and segments break where the speaker changes
+    assert item["speakers"][1] == {"start": 1.8, "end": 2.5, "speaker": 1}
+    assert item["timestamps"]["items"][0]["text"] == "Das"
+    assert [(s["start"], s["end"], s["text"], s["speaker"]) for s in item["segments"]] == [
+        (0.1, 0.5, "Das ist", 0), (2.0, 2.4, "gut", 1)
+    ]
+
+
+def test_diarization_without_aligner(make_client):
+    from .conftest import FakeDiarizer
+
+    diarizer = FakeDiarizer()
+    c = make_client(FakeEngine(), diarizer)
+    item = c.post("/transcribe?diarize=true", files=[("files", ("a.wav", wav_bytes()))]).json()[0]
+    assert len(item["speakers"]) == 2 and "segments" not in item and "timestamps" not in item
+    assert diarizer.calls == [None]
+
+
+def test_diarization_errors(make_client):
+    from .conftest import FakeDiarizer
+
+    r = make_client().post("/transcribe?diarize=true", files=[("files", ("a.wav", wav_bytes()))])
+    assert r.status_code == 503
+    r = make_client(FakeEngine(), FakeDiarizer()).post("/transcribe?diarize=true&num_speakers=0", files=[("files", ("a.wav", wav_bytes()))])
+    assert r.status_code == 422

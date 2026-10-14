@@ -53,8 +53,18 @@ class Engine:
         """Batch transcription. Returns [(text, language)] per input."""
         raise NotImplementedError
 
-    def align(self, audios: Sequence[Audio], texts: Sequence[str], language: Optional[str]) -> list:
+    def align(self, audios: Sequence[Audio], texts: Sequence[str], languages: Sequence[Optional[str]]) -> list:
+        """Word timings of `texts` in `audios`: per input {"items": [{"text", "start_time", "end_time"}]}
+        (or an equivalent object), times in seconds."""
         raise NotImplementedError(f"{self.name} backend does not support forced alignment")
+
+    def transcribe_aligned(
+        self, audios: Sequence[Audio], language: Optional[str], context: str = ""
+    ) -> List[Tuple[str, str, object]]:
+        """Transcription with word timings. Returns [(text, language, alignment)] per input."""
+        results = self.transcribe(audios, language, context)
+        alignments = self.align(audios, [text for text, _ in results], [language or lang for _, lang in results])
+        return [(text, lang, alignment) for (text, lang), alignment in zip(results, alignments)]
 
     def new_stream(self, language: Optional[str], context: str = "") -> Stream:
         raise NotImplementedError

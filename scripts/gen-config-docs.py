@@ -14,7 +14,7 @@ DOC = ROOT / "docs" / "configuration.md"
 BEGIN = "<!-- BEGIN GENERATED: scripts/gen-config-docs.py -->"
 END = "<!-- END GENERATED -->"
 MODULES = ["asr_server.app", "asr_server.engines.vllm_engine", "asr_server.engines.onnx_engine"]
-GROUP_ORDER = ["Server", "Limits", "Streaming", "Languages", "OpenAI API", "ONNX backend", "vLLM backend"]
+GROUP_ORDER = ["Server", "Limits", "Streaming", "Languages", "OpenAI API", "ONNX backend", "vLLM backend", "Speaker diarization"]
 
 
 def render() -> str:

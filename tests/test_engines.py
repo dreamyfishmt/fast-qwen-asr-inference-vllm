@@ -50,3 +50,28 @@ def test_onnx_long_audio_is_transcribed_in_segments(monkeypatch):
     calls.clear()
     engine.transcribe_long(audio, None, "", prefix=[7], prefix_samples=16000 * 40)
     assert calls[0][1] == ()
+
+
+def test_onnx_alignment_per_segment_with_offsets(monkeypatch):
+    from asr_server.engines import onnx_engine
+
+    engine = onnx_engine.OnnxEngine()
+    engine._mel_filters = onnx_engine._mel_filterbank()
+    seen = []
+
+    class Aligner:
+        def align(self, mel, text, language):
+            seen.append((mel.shape[2], text, language))
+            return [{"text": text, "start_time": 0.5, "end_time": 1.0}]
+
+    engine.aligner = Aligner()
+    monkeypatch.setattr(engine, "transcribe_tokens", lambda audio, language, context, prefix=(): [audio.shape[0]])
+    monkeypatch.setattr(engine, "parse", lambda tokens, language: (f"n{tokens[0]}", "German"))
+    audio = np.random.default_rng(0).standard_normal(16000 * 50).astype(np.float32)
+
+    [(text, language, alignment)] = engine.transcribe_aligned([(audio, 16000)], None)
+    pieces = [int(t[1:]) for t in text.split()]
+    assert len(pieces) == 2 and sum(pieces) == audio.shape[0]
+    # each segment is aligned with its own text (and the detected language); times are shifted by its start
+    assert [(t, lang) for _, t, lang in seen] == [(f"n{pieces[0]}", "German"), (f"n{pieces[1]}", "German")]
+    assert [it["start_time"] for it in alignment["items"]] == [0.5, round(0.5 + pieces[0] / 16000, 3)]
